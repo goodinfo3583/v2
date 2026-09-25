@@ -102,6 +102,10 @@ def build_historical_block_matrix(DATA_DIR):
         if valid_date_cols:
             master_df = master_df.sort_values(by=valid_date_cols[0], ascending=False)
             
+        # 💡 記憶體瘦身：轉為 category 格式
+        master_df['代號'] = master_df['代號'].astype('category')
+        master_df['股票名稱'] = master_df['股票名稱'].astype('category')
+            
     return master_df, [os.path.basename(f) for f in files[:10]]
 
 @st.cache_data(show_spinner=False, ttl=300)
@@ -125,7 +129,6 @@ def get_cached_b6_today(DATA_DIR):
     df_blocks = []
     for f in date_files[latest_date]:
         df = pd.DataFrame()
-        # 強大的標頭尋找器：自動跳過 OTC 檔案的髒標頭列
         for enc in ['utf-8-sig', 'cp950', 'big5', 'utf-8']:
             try:
                 with open(f, 'r', encoding=enc) as file:
@@ -141,7 +144,6 @@ def get_cached_b6_today(DATA_DIR):
                 continue
         if df.empty: continue
 
-        # 標準化欄位名稱以應對 TWSE 與 OTC 的不同寫法
         df.columns = [str(c).replace(" ", "").replace("\n", "").replace("\ufeff", "").strip() for c in df.columns]
         col_code = next((c for c in df.columns if '代號' in c or '證券代號' in c), None)
         col_name = next((c for c in df.columns if '名稱' in c or '證券名稱' in c), None)
@@ -153,9 +155,11 @@ def get_cached_b6_today(DATA_DIR):
         if all([col_code, col_name, col_price, col_vol, col_amt]):
             df['代號'] = df[col_code].astype(str).str.replace(r'\.0$', '', regex=True).str.replace(r'\D', '', regex=True)
             df['股票名稱'] = df[col_name].astype(str).str.strip()
-            df['成交價'] = pd.to_numeric(df[col_price].astype(str).replace(',', '', regex=True), errors='coerce')
-            df['成交股數'] = pd.to_numeric(df[col_vol].astype(str).replace(',', '', regex=True), errors='coerce')
-            df['成交金額'] = pd.to_numeric(df[col_amt].astype(str).replace(',', '', regex=True), errors='coerce')
+            
+            # 💡 記憶體瘦身與效能解放：使用 regex=False 進行替換，並強制 downcast 為 float32
+            df['成交價'] = pd.to_numeric(df[col_price].astype(str).str.replace(',', '', regex=False), errors='coerce').astype('float32')
+            df['成交股數'] = pd.to_numeric(df[col_vol].astype(str).str.replace(',', '', regex=False), errors='coerce').astype('float32')
+            df['成交金額'] = pd.to_numeric(df[col_amt].astype(str).str.replace(',', '', regex=False), errors='coerce').astype('float32')
             df['交易別'] = df[col_type].fillna('-') if col_type else '-'
             
             df = df[(df['代號'] != '0') & (df['代號'] != '') & (df['代號'] != 'nan') & (df['代號'] != 'None')]
@@ -219,6 +223,11 @@ def get_cached_b6_today(DATA_DIR):
     
     display_df = grouped_block[['代號', '股票名稱', '交易別', '成交價', '▼收盤價', '成交張數', '總額(億)']].copy()
     display_df = display_df.rename(columns={'成交價': dynamic_price_col})
+
+    # 💡 記憶體瘦身：文字欄位轉為 category
+    display_df['代號'] = display_df['代號'].astype('category')
+    display_df['股票名稱'] = display_df['股票名稱'].astype('category')
+    display_df['交易別'] = display_df['交易別'].astype('category')
 
     return display_df, dynamic_price_col
 
@@ -295,7 +304,7 @@ def show_b6_page(DATA_DIR):
     </div>
     """, unsafe_allow_html=True)
     
-    # 原本的提示語保持不變 (如果你想要更漂亮的提示框，也可以把 st.write 改成 st.info)
+    # 原本的提示語保持不變
     st.info("💡 鉅額交易有時為大戶私下換手籌碼，成交價可作為「支撐/壓力」的防守線；如果短線跌破建議嚴設停損。")
 
     render_b6_dashboard(
