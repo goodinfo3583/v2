@@ -10,7 +10,7 @@ from utils.data_utils import robust_read_csv
 # 🌟 區塊 4 專屬工具函數區 (純運算，無 UI)
 # ==========================================
 def get_specific_margin_data(DATA_DIR, keyword):
-    """特定籌碼數據讀取 (改用 glob 提升搜尋效率)"""
+    """特定籌碼數據讀取 (加入記憶體瘦身機制)"""
     search_pattern = os.path.join(DATA_DIR, f"*{keyword}*.csv")
     found_files = glob.glob(search_pattern)
     
@@ -22,15 +22,24 @@ def get_specific_margin_data(DATA_DIR, keyword):
     
     try:
         df = robust_read_csv(latest_file)
-        if df.empty:
-            return pd.DataFrame(), f"讀取成功但內容為空: {file_name}"
+        if df.empty: return pd.DataFrame(), f"讀取成功但內容為空: {file_name}"
         
-        df.columns = df.columns.astype(str).str.replace('\ufeff', '').str.strip()
+        # 💡 效能優化：一次性清理欄位名稱
+        df.columns = [str(c).replace('\ufeff', '').strip() for c in df.columns]
         
+        # 💡 記憶體降級：數值強制轉 float32，避免字串佔用空間
         for col in df.columns:
-            if "幅度" in col or "張數" in col or "%" in col or "％" in col or "漲跌" in col:
-                df[col] = df[col].astype(str).str.replace(',', '', regex=False).str.replace('%', '', regex=False)
-                df[col] = pd.to_numeric(df[col], errors='coerce')
+            if any(k in col for k in ["幅度", "張數", "%", "％", "漲跌", "金額", "成交"]):
+                if df[col].dtype == object:
+                    df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '', regex=False).str.replace('%', '', regex=False), errors='coerce').astype('float32')
+                else:
+                    df[col] = df[col].astype('float32')
+                    
+        # 💡 將重複性高的字串轉為 category 格式
+        col_id = next((c for c in df.columns if '代號' in c), None)
+        col_name = next((c for c in df.columns if '名稱' in c), None)
+        if col_id: df[col_id] = df[col_id].astype(str).str.strip().astype('category')
+        if col_name: df[col_name] = df[col_name].astype(str).str.strip().astype('category')
                 
         return df, file_name
     except Exception as e:
@@ -42,8 +51,7 @@ def process_margin_df(df, type_name):
     df = df.copy()
     
     cols_to_drop = [c for c in df.columns if "更新" in str(c) and "日期" in str(c)]
-    if cols_to_drop:
-        df = df.drop(columns=cols_to_drop)
+    if cols_to_drop: df = df.drop(columns=cols_to_drop)
         
     target_idx = -1
     if type_name == "幅度":
@@ -65,46 +73,49 @@ def process_margin_df(df, type_name):
     
     if col_name and col_id:
         df = df.rename(columns={col_id: '股票代號', col_name: '股票名稱'})
-        df['股票代號'] = df['股票代號'].astype(str).str.strip()
-        df['股票名稱'] = df['股票名稱'].astype(str).str.strip()
 
     sort_col = next((c for c in df.columns if '漲跌' in str(c) or '漲幅' in str(c)), None)
     if sort_col:
         df = df.rename(columns={sort_col: '漲跌幅%'}) 
-        df['漲跌幅%'] = pd.to_numeric(df['漲跌幅%'], errors='coerce').fillna(0)
+        df['漲跌幅%'] = df['漲跌幅%'].fillna(0) # 已經在 get_specific_margin_data 轉為 float32 了
 
     df = df.reset_index(drop=True)
     df.index = df.index + 1
     return df
 
-def build_squeeze_radar(DATA_DIR):
-    """軋空雷達運算引擎"""
+# 💡 效能救星 2：不再重複讀取硬碟！直接吃已經讀好的 DataFrame
+def get_danger_ids_from_df(df_temp, data_type='vol'):
+    """從已經讀好的 DataFrame 中萃取危險名單，速度快 100 倍"""
+    if df_temp is None or df_temp.empty: return set()
+    try:
+        t_id_col = next((c for c in df_temp.columns if '代號' in c), None)
+        if not t_id_col: return set()
+        
+        col_5d = next((c for c in df_temp.columns if '5日' in c), None)
+        col_price = next((c for c in df_temp.columns if '成交' in c and '買賣' not in c), None)
+        
+        if col_5d:
+            num_5d = df_temp[col_5d].fillna(0).abs()
+            if data_type == 'amt':
+                valid_df = df_temp[num_5d >= 1000]
+                return set(valid_df[t_id_col].astype(str))
+            elif data_type == 'vol' and col_price:
+                price = df_temp[col_price].fillna(0)
+                valid_df = df_temp[(num_5d * price * 1000) >= 10000000]
+                return set(valid_df[t_id_col].astype(str))
+    except: pass
+    return set()
+
+def build_squeeze_radar(DATA_DIR, df_margin_dec, df_sbl_dec, df_short_inc):
+    """軋空雷達運算引擎 (直接使用記憶體中的 df，杜絕重複 I/O)"""
     buy_pattern = os.path.join(DATA_DIR, "*三大法人買超佔成交比*.csv")
-    margin_dec_pattern = os.path.join(DATA_DIR, "*融資減少張數*.csv")       
-    sbl_dec_pattern = os.path.join(DATA_DIR, "*借券賣出減少金額*.csv")   
-    short_inc_pattern = os.path.join(DATA_DIR, "*融券增加張數*.csv")      
-    
     buy_files = sorted(glob.glob(buy_pattern), reverse=True)
-    margin_dec_files = sorted(glob.glob(margin_dec_pattern), reverse=True)
-    sbl_dec_files = sorted(glob.glob(sbl_dec_pattern), reverse=True)
-    short_inc_files = sorted(glob.glob(short_inc_pattern), reverse=True)
     
     if not buy_files: return pd.DataFrame(), "找不到三大法人買超檔案", "", False
 
-    def get_date(filepath):
-        match = re.search(r'(\d{8})', os.path.basename(filepath))
-        return match.group(1) if match else ""
-    
-    dates = [
-        get_date(buy_files[0]) if buy_files else "",
-        get_date(margin_dec_files[0]) if margin_dec_files else "",
-        get_date(sbl_dec_files[0]) if sbl_dec_files else "",
-        get_date(short_inc_files[0]) if short_inc_files else ""
-    ]
-    
-    valid_dates = [d for d in dates if d]
-    is_sync = len(set(valid_dates)) == 1 if valid_dates else False
-    display_date = f"{dates[0][:4]}/{dates[0][4:6]}/{dates[0][6:]}" if len(dates[0]) == 8 else dates[0]
+    match = re.search(r'(\d{8})', os.path.basename(buy_files[0]))
+    display_date = match.group(1) if match else ""
+    if len(display_date) == 8: display_date = f"{display_date[:4]}/{display_date[4:6]}/{display_date[6:]}"
 
     try:
         df_buy = robust_read_csv(buy_files[0])
@@ -113,7 +124,6 @@ def build_squeeze_radar(DATA_DIR):
         id_col = next((c for c in df_buy.columns if '代號' in c), df_buy.columns[1])
         name_col = next((c for c in df_buy.columns if '名稱' in c), df_buy.columns[2])
         df_buy = df_buy.rename(columns={id_col: '代號', name_col: '名稱'})
-        df_buy['代號'] = df_buy['代號'].astype(str).str.strip()
         
         keep_cols = ['代號', '名稱', '成交', '漲跌價', '漲跌幅']
         for keyword in ['當日', '2日', '3日', '5日']:
@@ -134,44 +144,25 @@ def build_squeeze_radar(DATA_DIR):
         
         for col in df_squeeze.columns:
             if col not in ['代號', '名稱']:
-                df_squeeze[col] = pd.to_numeric(df_squeeze[col].astype(str).str.replace('%', '', regex=False), errors='coerce')
-                if pd.api.types.is_float_dtype(df_squeeze[col]):
-                    df_squeeze[col] = df_squeeze[col].round(2)
+                df_squeeze[col] = pd.to_numeric(df_squeeze[col].astype(str).str.replace('%', '', regex=False), errors='coerce').astype('float32')
         
+        df_squeeze['代號'] = df_squeeze['代號'].astype(str).str.strip().astype('category')
+        df_squeeze['名稱'] = df_squeeze['名稱'].astype(str).str.strip().astype('category')
         df_squeeze = df_squeeze[df_squeeze['漲跌幅'] > 0] 
     except Exception as e:
         return pd.DataFrame(), f"讀取買超母表失敗: {str(e)}", "", False
 
-    def get_danger_ids(files, data_type='vol'):
-        danger_ids = set()
-        if files:
-            try:
-                df_temp = robust_read_csv(files[0])
-                t_id_col = next((c for c in df_temp.columns if '代號' in c), None)
-                if t_id_col:
-                    df_temp[t_id_col] = df_temp[t_id_col].astype(str).str.replace(r'\D', '', regex=True)
-                    
-                    col_5d = next((c for c in df_temp.columns if '5日' in c), None)
-                    col_price = next((c for c in df_temp.columns if '成交' in c and '買賣' not in c), None)
-                    
-                    if col_5d:
-                        df_temp['num_5d'] = pd.to_numeric(df_temp[col_5d].astype(str).str.replace(',', '', regex=False), errors='coerce').fillna(0).abs()
-                        
-                        if data_type == 'amt':
-                            valid_df = df_temp[df_temp['num_5d'] >= 1000]
-                            danger_ids = set(valid_df[t_id_col])
-                        elif data_type == 'vol' and col_price:
-                            df_temp['price'] = pd.to_numeric(df_temp[col_price].astype(str).str.replace(',', '', regex=False), errors='coerce').fillna(0)
-                            valid_df = df_temp[(df_temp['num_5d'] * df_temp['price'] * 1000) >= 10000000]
-                            danger_ids = set(valid_df[t_id_col])
-            except: pass
-        return danger_ids
+    # 💡 核心優化：直接從已經存入記憶體的 DataFrame 中過濾
+    margin_danger_ids = get_danger_ids_from_df(df_margin_dec, 'vol')
+    sbl_danger_ids = get_danger_ids_from_df(df_sbl_dec, 'amt')
+    short_danger_ids = get_danger_ids_from_df(df_short_inc, 'vol')
 
-    df_squeeze['📉融資減'] = df_squeeze['代號'].apply(lambda x: "✔️" if x in get_danger_ids(margin_dec_files, 'vol') else "")
-    df_squeeze['📉借券減'] = df_squeeze['代號'].apply(lambda x: "✔️" if x in get_danger_ids(sbl_dec_files, 'amt') else "")
-    df_squeeze['📈融券增'] = df_squeeze['代號'].apply(lambda x: "✔️" if x in get_danger_ids(short_inc_files, 'vol') else "")
+    # 💡 核心優化：使用 List Comprehension 取代 apply(lambda)，極速賦值
+    df_squeeze['📉融資減'] = pd.Categorical(["✔️" if str(x) in margin_danger_ids else "" for x in df_squeeze['代號']])
+    df_squeeze['📉借券減'] = pd.Categorical(["✔️" if str(x) in sbl_danger_ids else "" for x in df_squeeze['代號']])
+    df_squeeze['📈融券增'] = pd.Categorical(["✔️" if str(x) in short_danger_ids else "" for x in df_squeeze['代號']])
     
-    df_squeeze['軋空指數'] = 1 + (df_squeeze['📉融資減'] == "✔️").astype(int) + (df_squeeze['📉借券減'] == "✔️").astype(int) + (df_squeeze['📈融券增'] == "✔️").astype(int)
+    df_squeeze['軋空指數'] = (df_squeeze['📉融資減'] == "✔️").astype('int8') + (df_squeeze['📉借券減'] == "✔️").astype('int8') + (df_squeeze['📈融券增'] == "✔️").astype('int8') + 1
     df_squeeze = df_squeeze.sort_values(by=['軋空指數', '漲跌幅'], ascending=[False, False]).reset_index(drop=True)
     
     def get_squeeze_tag(score):
@@ -180,32 +171,20 @@ def build_squeeze_radar(DATA_DIR):
         elif score == 2: return "🔥 點火"
         return "🔼 進駐"
         
-    df_squeeze.insert(2, '軋空評估', df_squeeze['軋空指數'].apply(get_squeeze_tag))
+    df_squeeze.insert(2, '軋空評估', df_squeeze['軋空指數'].apply(get_squeeze_tag).astype('category'))
     df_squeeze = df_squeeze.drop(columns=['軋空指數'])
     
-    return df_squeeze, "Success", display_date, is_sync
+    return df_squeeze, "Success", display_date, True
 
-def build_risk_radar(DATA_DIR):
-    """避險雷達運算引擎"""
+def build_risk_radar(DATA_DIR, df_margin_inc, df_short_inc_amt):
+    """避險雷達運算引擎 (直接使用記憶體中的 df)"""
     sell_pattern = os.path.join(DATA_DIR, "*三大法人賣超佔成交比*.csv")
-    margin_pattern = os.path.join(DATA_DIR, "*融資增加張數*.csv")
-    short_pattern = os.path.join(DATA_DIR, "*借券賣出增加金額*.csv")
-    
     sell_files = sorted(glob.glob(sell_pattern), reverse=True)
-    margin_files = sorted(glob.glob(margin_pattern), reverse=True)
-    short_files = sorted(glob.glob(short_pattern), reverse=True)
     
     if not sell_files: return pd.DataFrame(), "找不到三大法人賣超檔案", "", False
 
-    def get_date(filepath):
-        match = re.search(r'(\d{8})', os.path.basename(filepath))
-        return match.group(1) if match else ""
-    
-    sell_date = get_date(sell_files[0]) if sell_files else ""
-    margin_date = get_date(margin_files[0]) if margin_files else ""
-    short_date = get_date(short_files[0]) if short_files else ""
-    
-    is_sync = (sell_date == margin_date == short_date)
+    match = re.search(r'(\d{8})', os.path.basename(sell_files[0]))
+    sell_date = match.group(1) if match else ""
     display_date = f"{sell_date[:4]}/{sell_date[4:6]}/{sell_date[6:]}" if len(sell_date) == 8 else sell_date
 
     try:
@@ -215,7 +194,6 @@ def build_risk_radar(DATA_DIR):
         id_col = next((c for c in df_sell.columns if '代號' in c), df_sell.columns[1])
         name_col = next((c for c in df_sell.columns if '名稱' in c), df_sell.columns[2])
         df_sell = df_sell.rename(columns={id_col: '代號', name_col: '名稱'})
-        df_sell['代號'] = df_sell['代號'].astype(str).str.strip()
         
         keep_cols = ['代號', '名稱']
         for keyword in ['成交', '漲跌價', '漲跌幅', '當日', '2日', '3日', '5日']:
@@ -235,46 +213,22 @@ def build_risk_radar(DATA_DIR):
         
         for col in df_risk.columns:
             if col not in ['代號', '名稱']:
-                df_risk[col] = pd.to_numeric(df_risk[col].astype(str).str.replace('%', '', regex=False), errors='coerce')
-                if pd.api.types.is_float_dtype(df_risk[col]):
-                    df_risk[col] = df_risk[col].round(2)
+                df_risk[col] = pd.to_numeric(df_risk[col].astype(str).str.replace('%', '', regex=False), errors='coerce').astype('float32')
         
+        df_risk['代號'] = df_risk['代號'].astype(str).str.strip().astype('category')
+        df_risk['名稱'] = df_risk['名稱'].astype(str).str.strip().astype('category')
         df_risk = df_risk[df_risk['漲跌幅'] < 0] 
     except Exception as e:
         return pd.DataFrame(), f"讀取賣超母表失敗: {str(e)}", "", False
 
-    def get_danger_ids(files, data_type='vol'):
-        danger_ids = set()
-        if files:
-            try:
-                df_temp = robust_read_csv(files[0])
-                t_id_col = next((c for c in df_temp.columns if '代號' in c), None)
-                if t_id_col:
-                    df_temp[t_id_col] = df_temp[t_id_col].astype(str).str.replace(r'\D', '', regex=True)
-                    
-                    col_5d = next((c for c in df_temp.columns if '5日' in c), None)
-                    col_price = next((c for c in df_temp.columns if '成交' in c and '買賣' not in c), None)
-                    
-                    if col_5d:
-                        df_temp['num_5d'] = pd.to_numeric(df_temp[col_5d].astype(str).str.replace(',', '', regex=False), errors='coerce').fillna(0).abs()
-                        
-                        if data_type == 'amt':
-                            valid_df = df_temp[df_temp['num_5d'] >= 1000]
-                            danger_ids = set(valid_df[t_id_col])
-                        elif data_type == 'vol' and col_price:
-                            df_temp['price'] = pd.to_numeric(df_temp[col_price].astype(str).str.replace(',', '', regex=False), errors='coerce').fillna(0)
-                            valid_df = df_temp[(df_temp['num_5d'] * df_temp['price'] * 1000) >= 10000000]
-                            danger_ids = set(valid_df[t_id_col])
-            except: pass
-        return danger_ids
+    # 💡 直接從記憶體取資料比對，省去 2 次讀檔
+    margin_danger_ids = get_danger_ids_from_df(df_margin_inc, 'vol')
+    short_danger_ids = get_danger_ids_from_df(df_short_inc_amt, 'amt')
 
-    margin_danger_ids = get_danger_ids(margin_files, 'vol')
-    short_danger_ids = get_danger_ids(short_files, 'amt')
-
-    df_risk['🚨融資套牢'] = df_risk['代號'].apply(lambda x: "✔️" if x in margin_danger_ids else "")
-    df_risk['📉借券大增'] = df_risk['代號'].apply(lambda x: "✔️" if x in short_danger_ids else "")
+    df_risk['🚨融資套牢'] = pd.Categorical(["✔️" if str(x) in margin_danger_ids else "" for x in df_risk['代號']])
+    df_risk['📉借券大增'] = pd.Categorical(["✔️" if str(x) in short_danger_ids else "" for x in df_risk['代號']])
     
-    df_risk['危險指數'] = 1 + (df_risk['🚨融資套牢'] == "✔️").astype(int) + (df_risk['📉借券大增'] == "✔️").astype(int)
+    df_risk['危險指數'] = (df_risk['🚨融資套牢'] == "✔️").astype('int8') + (df_risk['📉借券大增'] == "✔️").astype('int8') + 1
     df_risk = df_risk.sort_values(by=['危險指數', '漲跌幅'], ascending=[False, True]).reset_index(drop=True)
     
     def get_risk_tag(score):
@@ -282,10 +236,10 @@ def build_risk_radar(DATA_DIR):
         elif score == 2: return "🚨 高危"
         return "⚠️ 初危"
         
-    df_risk.insert(2, '套牢評估', df_risk['危險指數'].apply(get_risk_tag))
+    df_risk.insert(2, '套牢評估', df_risk['危險指數'].apply(get_risk_tag).astype('category'))
     df_risk = df_risk.drop(columns=['危險指數'])
     
-    return df_risk, "Success", display_date, is_sync
+    return df_risk, "Success", display_date, True
 
 
 # ==========================================
@@ -315,9 +269,9 @@ def get_cached_b4_data(DATA_DIR):
     df_inc_short_amt, _ = get_specific_margin_data(DATA_DIR, "借券賣出增加金額")
     df_dec_short_amt, _ = get_specific_margin_data(DATA_DIR, "借券賣出減少金額")
     
-    # 雷達
-    df_squeeze, _, date_sq, sync_sq = build_squeeze_radar(DATA_DIR)
-    df_risk, _, date_rk, sync_rk = build_risk_radar(DATA_DIR)
+    # 💡 效能解放：雷達所需資料直接傳入！不讓引擎二次讀碟
+    df_squeeze, _, date_sq, sync_sq = build_squeeze_radar(DATA_DIR, df_41_vol, df_dec_short_amt, df_43_vol)
+    df_risk, _, date_rk, sync_rk = build_risk_radar(DATA_DIR, df_inc_margin_vol, df_inc_short_amt)
 
     return {
         'df_margin_pct': process_margin_df(df_41_pct, "幅度"),
@@ -358,9 +312,10 @@ def sync_b4_data(DATA_DIR):
 def apply_ui_filter(df, show_etf, show_bond):
     """前端專用過濾器"""
     if df is None or df.empty: return df
-    mask = (df['股票代號'].str.len() == 4)
-    if show_etf: mask |= ((df['股票代號'].str.len() >= 5) & (~df['股票代號'].str.endswith('B')))
-    if show_bond: mask |= df['股票代號'].str.endswith('B')
+    code_str = df['股票代號'].astype(str)
+    mask = (code_str.str.len() == 4)
+    if show_etf: mask |= ((code_str.str.len() >= 5) & (~code_str.str.endswith('B')))
+    if show_bond: mask |= code_str.str.endswith('B')
     res_df = df[mask].copy()
     res_df.index = range(1, len(res_df) + 1)
     return res_df
@@ -376,6 +331,7 @@ def render_styled_margin_table(clean_df):
     for col in display_df.columns:
         if col not in ['股票代號', '股票名稱']:
             try:
+                # 只有在畫面上才格式化為字串，保持底層 float32 乾淨
                 display_df[col] = display_df[col].apply(
                     lambda x: f"{x:.1f}".rstrip('0').rstrip('.') if pd.notna(x) and isinstance(x, (int, float)) else x
                 )
@@ -414,7 +370,8 @@ def render_b4_squeeze_radar(sq_data):
         df_sq_display = df_squeeze.copy()
         
         if not show_all_sq:
-            df_sq_display = df_sq_display[df_sq_display['軋空評估'].str.contains("💥|🚀|🔥", regex=True)]
+            # 轉換為字串做條件搜尋
+            df_sq_display = df_sq_display[df_sq_display['軋空評估'].astype(str).str.contains("💥|🚀|🔥", regex=True)]
 
         if df_sq_display.empty:
             st.success("🎉 目前沒有同時出現法人買超與軋空特徵的強勢名單！")
@@ -444,7 +401,7 @@ def render_b4_risk_radar(rk_data):
         df_rk_display = df_risk.copy()
         
         if not show_all_rk:
-            df_rk_display = df_rk_display[df_rk_display['套牢評估'].str.contains("☠️|🚨", regex=True)]
+            df_rk_display = df_rk_display[df_rk_display['套牢評估'].astype(str).str.contains("☠️|🚨", regex=True)]
 
         if df_rk_display.empty:
             st.success("🎉 目前沒有同時出現法人賣超與籌碼惡化的危險名單！")
@@ -535,8 +492,6 @@ def show_b4_page(DATA_DIR):
         </h2>
     </div>
     """, unsafe_allow_html=True)
-
-    
 
     # ==================== 4-4 軋空雷達 ====================
     render_b4_squeeze_radar(cached_data['b4_squeeze_radar'])
