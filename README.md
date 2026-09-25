@@ -2,7 +2,7 @@
 
 
 
-專案架構goodinfo3583/trace3dafaram-
+專案架構Github/goodinfo3583/gfpav2
 
 📁 專案根目錄/
 
