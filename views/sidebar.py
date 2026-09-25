@@ -37,7 +37,15 @@ KEY_MAP = {
 }
 
 def get_sidebar_df(primary_key):
-    """🌟 側邊欄專用萬能變數雷達：支援新舊 Session State 鑰匙"""
+    """🌟 側邊欄專用萬能變數雷達 (記憶體優化版)"""
+    # 🚀 記憶體救星 1：全系統最肥的券商歷史大表，絕對不要去讀 session_state！直接拿快取！
+    if primary_key == 'broker_history':
+        try:
+            from views.broker_page import load_full_blood_broker_history
+            return load_full_blood_broker_history()
+        except Exception:
+            return pd.DataFrame()
+
     aliases = KEY_MAP.get(primary_key, [primary_key])
     for k in aliases:
         df = st.session_state.get(k)
@@ -46,110 +54,78 @@ def get_sidebar_df(primary_key):
     return pd.DataFrame()
 
 def ensure_b1_to_b5_loaded(DATA_DIR):
-    """🚀 背景自動補載機制：當搜尋時發現數據缺失，自動觸發 B1~B5 後台同步引擎"""
-    if not DATA_DIR or not os.path.exists(DATA_DIR):
-        return
-    # B1 補載
+    """🚀 背景自動補載機制 (已移除記憶體毒瘤)"""
+    if not DATA_DIR or not os.path.exists(DATA_DIR): return
+
     if get_sidebar_df('b1_final_df').empty:
-        try:
-            from views.b1_page import sync_b1_data
-            sync_b1_data(DATA_DIR)
+        try: from views.b1_page import sync_b1_data; sync_b1_data(DATA_DIR)
         except: pass
-
-    # B2 補載
     if get_sidebar_df('b2_1').empty:
-        try:
-            from views.b2_page import sync_b2_data
-            sync_b2_data(DATA_DIR)
+        try: from views.b2_page import sync_b2_data; sync_b2_data(DATA_DIR)
         except: pass
-
-    # B3 補載
     if get_sidebar_df('b3_main').empty:
-        try:
-            from views.b3_page import sync_b3_data
-            sync_b3_data(DATA_DIR)
+        try: from views.b3_page import sync_b3_data; sync_b3_data(DATA_DIR)
         except: pass
-
-    # B4 補載
     if get_sidebar_df('b4_margin_pct').empty:
-        try:
-            from views.b4_page import sync_b4_data
-            sync_b4_data(DATA_DIR)
+        try: from views.b4_page import sync_b4_data; sync_b4_data(DATA_DIR)
         except: pass
-
-    # B5 補載
     if get_sidebar_df('b5_1000').empty:
-        try:
-            from views.b5_page import sync_b5_data
-            sync_b5_data(DATA_DIR)
+        try: from views.b5_page import sync_b5_data; sync_b5_data(DATA_DIR)
         except: pass
-        
-    # B7 補載 
     if get_sidebar_df('b7_main').empty:
-        try:
-            from views.b7_page import sync_b7_data
-            sync_b7_data(DATA_DIR)
+        try: from views.b7_page import sync_b7_data; sync_b7_data(DATA_DIR)
         except: pass
-        
-    # B7 最新質押比 補載
     if get_sidebar_df('b7_pledge').empty:
-        try:
-            from views.b7_page import sync_pledge_data
-            sync_pledge_data(DATA_DIR)
+        try: from views.b7_page import sync_pledge_data; sync_pledge_data(DATA_DIR)
         except: pass
-
-    # B7 質押歷史趨勢 補載
     if get_sidebar_df('b7_pledge_history').empty:
-        try:
-            from views.b7_page import sync_pledge_history_data
-            sync_pledge_history_data(DATA_DIR)
+        try: from views.b7_page import sync_pledge_history_data; sync_pledge_history_data(DATA_DIR)
         except: pass 
-
-    # 券商分點歷史明細 補載
-    if get_sidebar_df('broker_history').empty:
-        try:
-            from views.broker_page import load_raw_broker_history
-            remote_csv_url = "https://raw.githubusercontent.com/goodinfo3583/tw-broker-data/main/data/broker/broker_history.csv"
-            df_broker = load_raw_broker_history(remote_csv_url)
-            if not df_broker.empty:
-                st.session_state['broker_history_df'] = df_broker
-        except: pass
+    
+    # 🛑 移除了原本把 broker_history 塞進 st.session_state 的致命邏輯
+    # 現在交由上面的 get_sidebar_df 直接去快取池拿取，不佔用任何額外記憶體！
 
 # ==========================================
 # 🌟 快搜各頁面與顯示工具函數區 
 # ==========================================
 def robust_search_engine(df, query):
+    """🚀 極速省記憶體版搜尋引擎 (Zero-Copy 技術)"""
     if df is None or df.empty: return pd.DataFrame()
-    df = df.loc[:, ~df.columns.duplicated()].copy()
-    
     query = str(query).strip()
     if not query: return pd.DataFrame()
 
     col_id = '股票代號' if '股票代號' in df.columns else ('代號' if '代號' in df.columns else None)
     col_name = '股票名稱' if '股票名稱' in df.columns else ('名稱' if '名稱' in df.columns else None)
 
-    if col_id:
-        df[col_id] = df[col_id].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-    if col_name:
-        df[col_name] = df[col_name].astype(str).str.strip()
-
+    # 🛑 記憶體救星 2：絕對不要在這裡直接 df.copy()！
+    # 我們改用 Pandas 視圖 (View) 與布林遮罩 (Mask) 在底層尋找，記憶體消耗是 0。
     exact_mask = pd.Series(False, index=df.index)
+    id_series = None
+    name_series = None
+
     if col_id:
-        exact_mask = exact_mask | (df[col_id] == query)
+        id_series = df[col_id].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+        exact_mask |= (id_series == query)
     if col_name:
-        exact_mask = exact_mask | (df[col_name].str.lower() == query.lower())
+        name_series = df[col_name].astype(str).str.strip().str.lower()
+        exact_mask |= (name_series == query.lower())
 
     exact_result = df[exact_mask]
     if not exact_result.empty:
-        return exact_result
+        # 💡 只有當確定過濾出「那 1 筆」資料時，才去 copy() 這小小的一筆資料回傳
+        return exact_result.loc[:, ~exact_result.columns.duplicated()].copy()
 
     partial_mask = pd.Series(False, index=df.index)
     if col_id:
-        partial_mask = partial_mask | df[col_id].str.contains(query, na=False)
+        partial_mask |= id_series.str.contains(query, na=False)
     if col_name:
-        partial_mask = partial_mask | df[col_name].str.contains(query, na=False, case=False)
+        partial_mask |= name_series.str.contains(query, na=False, case=False)
 
-    return df[partial_mask]
+    partial_result = df[partial_mask]
+    if not partial_result.empty:
+        return partial_result.loc[:, ~partial_result.columns.duplicated()].copy()
+        
+    return pd.DataFrame()
 
 # ==========================================
 def scan_and_display(title, session_key, query):
