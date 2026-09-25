@@ -1,0 +1,50 @@
+name: company_month_scraper
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 🌟 修改 1：設定為每個月的 15 號中午 12:30 (台灣時間) 自動執行
+    # 伺服器時間為 UTC (04:30)，加上 8 小時剛好是台灣的 12:30
+    # 語法：'分 時 日 月 星期'
+    - cron: '30 4 15 * *'
+
+permissions:
+  contents: write
+
+jobs:
+  run-crawler:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Taipei
+
+    steps:
+    - name: 📥 1. 取得專案代碼
+      uses: actions/checkout@v4
+
+    - name: 🐍 2. 設定 Python 3.10 環境
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    # 🌟 升級裝備：安裝 xvfb 虛擬螢幕與 undetected-chromedriver
+    - name: 📦 3. 安裝爬蟲套件與虛擬顯示器
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y xvfb
+        python -m pip install --upgrade pip
+        pip install selenium pandas lxml html5lib requests beautifulsoup4 undetected-chromedriver
+
+    # 🌟 修改 2：將執行的檔案名稱改為 company_month_scraper.py
+    - name: 🚀 4. 執行籌碼爬蟲腳本
+      run: |
+        xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python "company_month_scraper.py"
+
+    - name: 🔄 5. 更新遠端進度 (避免衝突)
+      run: |
+        git pull --rebase --autostash origin main
+
+    - name: 💾 6. 自動將產生的 CSV 提交並上傳回 GitHub
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "🤖 自動排程：更新月董監籌碼資料"
+        file_pattern: 'data/*'

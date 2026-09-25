@@ -1,0 +1,52 @@
+name: Evening Stock Scraper (18:20)
+
+on:
+  schedule:
+    # 台灣時間 18:20 = UTC 時間 10:20
+    # 執行時間：星期一到星期五 (1-5)
+    - cron: '20 10 * * 1-5'
+  workflow_dispatch: 
+
+permissions:
+  contents: write
+
+jobs:
+  scrape_and_commit:
+    runs-on: ubuntu-latest
+    
+    env:
+      TZ: Asia/Taipei
+
+    steps:
+    - name: 檢查並複製專案程式碼
+      uses: actions/checkout@v4
+
+    - name: 設定 Python 環境
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    # 🌟 升級點 1：安裝 xvfb 虛擬螢幕套件
+    - name: 安裝執行爬蟲所需的套件與虛擬顯示器
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y xvfb
+        python -m pip install --upgrade pip
+        # ↓↓↓ 讓系統自動讀取 requirements.txt 裡面的清單 ↓↓↓
+        pip install -r requirements.txt
+
+    # 🌟 升級點 2：使用 xvfb-run 啟動 Python，欺騙 Cloudflare 這是一台有螢幕的電腦
+    - name: 執行 18:20 Python 爬蟲程式
+      run: |
+        xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python "newdaily1820_scraper.py" 
+
+    # 🌟 升級點 3：推播前自動同步 GitHub 最新狀態，防止 35 分鐘空窗期造成版本衝突
+    - name: 更新遠端進度 (避免衝突)
+      run: |
+        git pull --rebase --autostash origin main
+
+    - name: 自動將更新的籌碼 CSV 資料推回 GitHub
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "自動更新 18:20 籌碼資料"
+        file_pattern: 'data/*'
