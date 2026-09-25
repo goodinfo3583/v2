@@ -8,3 +8,4 @@ requests
 streamlit-authenticator
 pyarrow
 fastparquet
+matplotlib
