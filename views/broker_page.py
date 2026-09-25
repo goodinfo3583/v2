@@ -344,7 +344,6 @@ def render(STOCK_DICT=None):
 
     st.markdown(f"""券商動向基準日：{latest_date}""", unsafe_allow_html=True)
     # 【已刪除】：強制刷新最新資料的 columns 和 button 區塊
-
     st.markdown("### 🌍 全市場連買分點快搜")
     scan_tab1, scan_tab2 = st.tabs(["🔹 Top 15主力買超排行", "🔹 單一主力成本分析(豆腐好吃)"])
 
@@ -470,7 +469,7 @@ def render(STOCK_DICT=None):
     st.markdown("---")
 
     # 🌟 3. 個股查詢器 🌟
-    st.markdown("### 🔍 個股分點買超及集中度查詢")
+    st.markdown("### 🔍 個股查詢與走勢圖")
     stock_options = []
     if STOCK_DICT:
         unique_options = {f"{v['id']} {v['name']}" for v in STOCK_DICT.values() if len(str(v['id'])) <= 4}
@@ -485,31 +484,22 @@ def render(STOCK_DICT=None):
         display_name = selected_stock_str
         
         if not df_raw_all.empty:
-            # 確保型別正確：將 target_stock 轉為與 df_raw_all['stock_code'] 相同的型別以進行比對
+            # 確保 stock_code 型別為字串以進行比對
             stock_raw = df_raw_all[df_raw_all['stock_code'].astype(str) == target_stock].copy()
             
             if not stock_raw.empty:
                 try: 
-                    # 💡 還原舊版寫法：只傳入 stock_raw。
-                    # 如果 utils.data_utils 裡面的函式確實需要 target_stock 參數，請看下方的備註說明。
-                    df_trend = calculate_chip_concentration(stock_raw)
+                    # 💡 解答關鍵：同步使用與側邊欄完全一樣的「遠端 URL + 股票代號」來呼叫函式！
+                    # 捨棄傳入瘦身過的 stock_raw，避免計算函式找不到原始欄位
+                    remote_csv_url = "https://raw.githubusercontent.com/goodinfo3583/tw-broker-data/main/data/broker/broker_history.csv"
+                    df_trend = calculate_chip_concentration(remote_csv_url, target_stock)
                     
                     if not df_trend.empty: 
+                        # 這裡的 stock_raw 保留給下方的「券商分點進出明細」表格使用（不影響圖表）
                         render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend)
                     else:
-                        st.warning(f"⚠️ {display_name} 有交易紀錄，但算出的集中度資料為空。請確認資料欄位是否完整。")
+                        st.warning(f"⚠️ {display_name} 有交易紀錄，但後台算出的集中度資料為空。")
                 except Exception as e:
-                    # 如果發生錯誤，明確印出錯誤訊息，不要讓它被隱藏
                     st.error(f"❌ 在計算集中度時發生程式錯誤：\n\n {e}")
-                    
-                    # 🚑 備用方案：如果真的報錯說缺少參數 target_stock，則嘗試傳入兩個參數
-                    try:
-                        st.info("🔄 嘗試使用雙參數模式重新計算...")
-                        df_trend = calculate_chip_concentration(stock_raw, target_stock)
-                        if not df_trend.empty:
-                            render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend)
-                            st.success("✅ 雙參數模式計算成功！")
-                    except Exception as e2:
-                        st.error(f"❌ 雙參數模式依然失敗：\n\n {e2}")
             else: 
                 st.warning(f"⚠️ 資料庫中找不到 {display_name} 的交易紀錄。")
