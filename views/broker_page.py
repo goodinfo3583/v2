@@ -485,17 +485,31 @@ def render(STOCK_DICT=None):
         display_name = selected_stock_str
         
         if not df_raw_all.empty:
-            stock_raw = df_raw_all[df_raw_all['stock_code'] == target_stock].copy()
+            # 確保型別正確：將 target_stock 轉為與 df_raw_all['stock_code'] 相同的型別以進行比對
+            stock_raw = df_raw_all[df_raw_all['stock_code'].astype(str) == target_stock].copy()
+            
             if not stock_raw.empty:
-                try:
-                    df_trend = calculate_chip_concentration(stock_raw, target_stock)
-                                        
+                try: 
+                    # 💡 還原舊版寫法：只傳入 stock_raw。
+                    # 如果 utils.data_utils 裡面的函式確實需要 target_stock 參數，請看下方的備註說明。
+                    df_trend = calculate_chip_concentration(stock_raw)
+                    
                     if not df_trend.empty: 
                         render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend)
                     else:
-                        st.warning(f"⚠️ {display_name} 有交易紀錄，但算出的集中度資料為空。")
+                        st.warning(f"⚠️ {display_name} 有交易紀錄，但算出的集中度資料為空。請確認資料欄位是否完整。")
                 except Exception as e:
-                    # 把錯誤捕捉並顯示在畫面上，方便除錯
+                    # 如果發生錯誤，明確印出錯誤訊息，不要讓它被隱藏
                     st.error(f"❌ 在計算集中度時發生程式錯誤：\n\n {e}")
+                    
+                    # 🚑 備用方案：如果真的報錯說缺少參數 target_stock，則嘗試傳入兩個參數
+                    try:
+                        st.info("🔄 嘗試使用雙參數模式重新計算...")
+                        df_trend = calculate_chip_concentration(stock_raw, target_stock)
+                        if not df_trend.empty:
+                            render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend)
+                            st.success("✅ 雙參數模式計算成功！")
+                    except Exception as e2:
+                        st.error(f"❌ 雙參數模式依然失敗：\n\n {e2}")
             else: 
                 st.warning(f"⚠️ 資料庫中找不到 {display_name} 的交易紀錄。")
