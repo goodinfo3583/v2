@@ -97,7 +97,13 @@ def render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend):
     from plotly.subplots import make_subplots
     st.subheader(f"📊 {display_name} 籌碼與股價共振走勢")
     
-    df_trend_plot = df_trend.copy().dropna(subset=['stock_price'])
+    df_trend_plot = df_trend.copy()
+    
+    # 🛡️ 加入防呆機制：檢查是否真的有股價欄位
+    has_price = 'stock_price' in df_trend_plot.columns
+    if has_price:
+        df_trend_plot = df_trend_plot.dropna(subset=['stock_price'])
+        
     fig_trend = make_subplots(specs=[[{"secondary_y": True}]])
     colors = ['#FF4B4B' if val > 0 else '#00E272' for val in df_trend_plot['concentration_%']]
     fig_trend.add_trace(go.Bar(x=df_trend_plot['trade_date'], y=df_trend_plot['concentration_%'], marker_color=colors, name='單日集中度', opacity=0.4), secondary_y=True)
@@ -105,7 +111,10 @@ def render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend):
     if '5日集中度(%)' in df_trend_plot.columns: fig_trend.add_trace(go.Scatter(x=df_trend_plot['trade_date'], y=df_trend_plot['5日集中度(%)'], mode='lines', line=dict(color='#FFD700', width=2), name='5日集中度'), secondary_y=True)
     if '10日集中度(%)' in df_trend_plot.columns: fig_trend.add_trace(go.Scatter(x=df_trend_plot['trade_date'], y=df_trend_plot['10日集中度(%)'], mode='lines', line=dict(color='#FF8C00', width=1.5, dash='dot'), name='10日集中度'), secondary_y=True)
     if '20日集中度(%)' in df_trend_plot.columns: fig_trend.add_trace(go.Scatter(x=df_trend_plot['trade_date'], y=df_trend_plot['20日集中度(%)'], mode='lines', line=dict(color='#FF00FF', width=1.5, dash='dash'), name='20日集中度'), secondary_y=True)
-    fig_trend.add_trace(go.Scatter(x=df_trend_plot['trade_date'], y=df_trend_plot['stock_price'], mode='lines+markers', line=dict(color='#38bdf8', width=2), name='市場均價(股價)'), secondary_y=False)
+    
+    # 🛡️ 只有在有股價資料時才畫出股價線
+    if has_price:
+        fig_trend.add_trace(go.Scatter(x=df_trend_plot['trade_date'], y=df_trend_plot['stock_price'], mode='lines+markers', line=dict(color='#38bdf8', width=2), name='市場均價(股價)'), secondary_y=False)
     
     stock_raw = df_raw_all[df_raw_all['stock_code'] == target_stock].copy()
     broker_col = next((c for c in ['broker_name', 'broker', '券商名稱', '券商', 'name'] if c in stock_raw.columns), None)
@@ -123,7 +132,8 @@ def render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend):
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         xaxis=dict(type='category', tickmode='array', tickvals=df_trend_plot['trade_date'], ticktext=df_trend_plot['trade_date'].astype(str).str.slice(5, 10), tickangle=45)
     )
-    fig_trend.update_yaxes(title_text="**股價 (元)**", secondary_y=False, gridcolor='#334155')
+    if has_price:
+        fig_trend.update_yaxes(title_text="**股價 (元)**", secondary_y=False, gridcolor='#334155')
     fig_trend.update_yaxes(title_text="**集中度 (%)**", secondary_y=True, showgrid=False)
     st.plotly_chart(fig_trend, use_container_width=True, config={'displayModeBar': False})
     
@@ -133,6 +143,7 @@ def render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend):
         st.dataframe(df_trend_disp.style.format({'淨買超(張)': fmt_float, '集中度(%)': "{:.2f}"}), use_container_width=True, hide_index=True)
 
     st.markdown("---")
+# ... (下方保持原樣) ...
     st.subheader(f"🔍 {display_name} 券商分點進出明細")
     if broker_col is None: return st.error("⚠️ 無法在資料庫中找到「券商名稱」欄位！")
     available_dates = sorted(stock_raw['trade_date'].dropna().unique(), reverse=True)
