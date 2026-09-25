@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+plotly
+yfinance
+st-gsheets-connection
+requests
+streamlit-authenticator
+pyarrow
+fastparquet
