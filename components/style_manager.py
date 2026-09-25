@@ -419,11 +419,14 @@ def render_b4_top10_glass_card():
         df_sq, df_rk = sq_data['df'], rk_data['df']
         date_sq = sq_data['date'][-4:] if sq_data['date'] and len(sq_data['date']) >= 4 else "未知"
         date_rk = rk_data['date'][-4:] if rk_data['date'] and len(rk_data['date']) >= 4 else "未知"
+        
         def get_pure_radar_stocks(df):
             if df is None or df.empty: return pd.DataFrame()
             df['代號'] = df['代號'].astype(str).str.strip()
             return df[(df['代號'].str.len() == 4) & (~df['代號'].str.startswith('00'))].copy()
+            
         pure_sq, pure_rk = get_pure_radar_stocks(df_sq).head(20), get_pure_radar_stocks(df_rk).head(20)
+        
         def make_radar_html(df, start_idx, theme):
             sub_df = df.iloc[start_idx : start_idx+10]
             if sub_df.empty: return "<p style='font-size:13.5px; text-align:center; color:#94A3B8; margin-top:40px;'>尚無目標</p>"
@@ -431,6 +434,11 @@ def render_b4_top10_glass_card():
             for i, row in enumerate(sub_df.to_dict('records')):
                 status = row.get('軋空評估', '') if theme == 'sq' else row.get('套牢評估', '')
                 pct = row.get('漲跌幅', 0.0)
+                
+                # 💡 修復記憶體 float32 造成的無限小數點問題 (強制限制到小數點後 1 位)
+                try: pct_fmt = f"{float(pct):.1f}"
+                except: pct_fmt = "0.0"
+                
                 short_status = status[:7] if len(status) > 7 else status
                 pct_color = "#FF4C4C" if theme == 'sq' else "#00e676"                
                 html += (
@@ -439,12 +447,13 @@ def render_b4_top10_glass_card():
                     f"      <b style='color:#FFF; width:22px; flex-shrink: 0;'>{start_idx + i + 1}.</b>"
                     f"      <span style='white-space:nowrap; overflow:hidden; text-overflow:ellipsis;'>{row['代號']}{row['名稱']}</span>"
                     f"  </div>"
-                    f"  <div style='width: 25%; color:#FFD700; font-size: 11px; text-align: left; white-space:nowrap;'>{short_status}</div>"
-                    f"  <div style='width: 20%; color:{pct_color}; font-weight:bold; text-align: right;'>{pct}%</div>"
+                    f"  <div style='width: 25%; color:#FFD700; font-size: 11px; text-align: left; white-space:nowrap; flex-shrink: 0;'>{short_status}</div>"
+                    f"  <div style='width: 20%; color:{pct_color}; font-weight:bold; text-align: right; white-space:nowrap; flex-shrink: 0;'>{pct_fmt}%</div>"
                     f"</li>"
                 )
             html += "</ul>"
             return html
+            
         h_sq_1_10, h_sq_11_20 = make_radar_html(pure_sq, 0, 'sq'), make_radar_html(pure_sq, 10, 'sq')
         h_rk_1_10, h_rk_11_20 = make_radar_html(pure_rk, 0, 'rk'), make_radar_html(pure_rk, 10, 'rk')
 
@@ -497,8 +506,7 @@ def render_b4_top10_glass_card():
 </div></div>
 """
         st.markdown(card_html, unsafe_allow_html=True)
-    except Exception as e: pass  
-
+    except Exception as e: pass
 #B5 大腿動向玻璃卡片
 def render_b5_top10_glass_card():
     if 'b5_1000' not in st.session_state or 'b5_400' not in st.session_state: return

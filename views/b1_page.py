@@ -19,7 +19,6 @@ def load_foreign_ratio_data(data_dir):
     """掃描資料夾中所有外資持股比例的 CSV 與 Parquet 檔案 (記憶體優化版)"""
     search_patterns = [
         os.path.join(data_dir, "*外資持股比例*.parquet"),
-        os.path.join(data_dir, "*外資持股比例*.csv")
     ]
     foreign_files = []
     for pattern in search_patterns:
