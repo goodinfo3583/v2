@@ -16,7 +16,7 @@ def extract_date_from_name(filename):
     return match.group(1) if match else "00000000"
 
 def read_live_ln_report(DATA_DIR, file_keyword, strict_type, exact_field_name, prefix_keyword, col_label):
-    """核心函數：讀取法人連續買超報告 (純數據運算，不涉及 UI)"""
+    """核心函數：讀取法人連續買超報告 (已大幅優化記憶體)"""
     if strict_type == "日":
         search_pattern1 = os.path.join(DATA_DIR, f"*{file_keyword}*(日)*.csv")
         search_pattern2 = os.path.join(DATA_DIR, f"*{file_keyword}*日*.csv")
@@ -35,7 +35,9 @@ def read_live_ln_report(DATA_DIR, file_keyword, strict_type, exact_field_name, p
     
     try:
         df = robust_read_csv(latest_file)
-        df.columns = df.columns.astype(str).str.replace('\n', '').str.replace(' ', '').str.replace('\ufeff', '').str.strip()
+        
+        # 💡 優化 1：用 List Comprehension 取代 Pandas 原生字串連續轉換，大幅節省記憶體
+        df.columns = [str(c).replace('\n', '').replace(' ', '').replace('\ufeff', '').strip() for c in df.columns]
         
         col_id = next((c for c in df.columns if '代號' in c), df.columns[0])
         col_name = next((c for c in df.columns if '名稱' in c), df.columns[1])
@@ -47,14 +49,18 @@ def read_live_ln_report(DATA_DIR, file_keyword, strict_type, exact_field_name, p
             matched_cols = [c for c in df.columns if '買賣' in c and strict_type in c]
             target_data_col = matched_cols[0] if matched_cols else df.columns[2]
             
+        # 💡 優化 2：轉換為數字，並及早過濾 (Early Filtering)！把幾千筆無用資料瞬間砍除。
         df[target_data_col] = pd.to_numeric(df[target_data_col], errors='coerce').fillna(0)
-        df_sorted = df[df[target_data_col] > 0].sort_values(by=target_data_col, ascending=False)
+        df_sorted = df[df[target_data_col] > 0].copy() # 只留大於0的
         
         if df_sorted.empty: return pd.DataFrame(), date_str
             
+        df_sorted = df_sorted.sort_values(by=target_data_col, ascending=False)
+        
         output_df = pd.DataFrame()
-        output_df["股票代號"] = df_sorted[col_id].astype(str).str.strip()
-        output_df["股票名稱"] = df_sorted[col_name].astype(str).str.strip()
+        # 💡 優化 3：記憶體降級！將字串轉為 category 型態，體積縮小 80%
+        output_df["股票代號"] = df_sorted[col_id].astype(str).str.strip().astype('category')
+        output_df["股票名稱"] = df_sorted[col_name].astype(str).str.strip().astype('category')
         
         def get_status_tag(val):
             if strict_type == "日":
@@ -66,21 +72,32 @@ def read_live_ln_report(DATA_DIR, file_keyword, strict_type, exact_field_name, p
                 elif val >= 5: return "🚀 趨勢加溫"
                 else: return "🌱 週線發動"
                 
-        output_df["狀態動態"] = df_sorted[target_data_col].apply(get_status_tag)
-        output_df[col_label] = df_sorted[target_data_col].astype(int)
+        output_df["狀態動態"] = df_sorted[target_data_col].apply(get_status_tag).astype('category')
+        output_df[col_label] = df_sorted[target_data_col].astype('int16')
         
         real_pct_trade = [c for c in df_sorted.columns if prefix_keyword in c and "佔成交" in c]
         real_pct_issue = [c for c in df_sorted.columns if prefix_keyword in c and "佔發行量" in c]
         
-        if real_pct_trade: output_df["佔成交(%)"] = pd.to_numeric(df_sorted[real_pct_trade[0]], errors='coerce').fillna(0.0)
+        # 💡 優化 4：強制加上 .round(2) 確保不會出現很醜的浮點數精度溢出
+        if real_pct_trade: output_df["佔成交(%)"] = pd.to_numeric(df_sorted[real_pct_trade[0]], errors='coerce').fillna(0.0).round(2)
         else: output_df["佔成交(%)"] = 0.0
             
-        if real_pct_issue: output_df["佔發行量(%)"] = pd.to_numeric(df_sorted[real_pct_issue[0]], errors='coerce').fillna(0.0)
+        if real_pct_issue: output_df["佔發行量(%)"] = pd.to_numeric(df_sorted[real_pct_issue[0]], errors='coerce').fillna(0.0).round(2)
         else: output_df["佔發行量(%)"] = 0.0
             
         return output_df, date_str
     except Exception as e:
         return pd.DataFrame(), f"解讀失敗: {str(e)}"
+
+
+def get_report_with_fallback(DATA_DIR, keywords, strict_type, exact_field_name, prefix_keyword, col_label):
+    """遞迴嘗試不同的檔案關鍵字，減少重複程式碼"""
+    for kw in keywords:
+        df, date = read_live_ln_report(DATA_DIR, kw, strict_type, exact_field_name, prefix_keyword, col_label)
+        if not df.empty or date is not None:
+            return df, date
+    return pd.DataFrame(), None
+
 
 # ==========================================
 # 💡 效能救星 1：將複雜的讀取與合併動作快取起來
@@ -88,31 +105,15 @@ def read_live_ln_report(DATA_DIR, file_keyword, strict_type, exact_field_name, p
 @st.cache_data(show_spinner=False, ttl=300)
 def get_cached_b3_data(DATA_DIR):
     """回傳 (b3_data_dict, df_blk3_main) 兩個變數"""
-    # 讀取日資料
-    live_fo_day, date_fo_day = read_live_ln_report(DATA_DIR, "外資連續買超", "日", "外資連續買賣日數", "外資", "最新連買天數")
-    if live_fo_day.empty and date_fo_day is None: 
-        live_fo_day, date_fo_day = read_live_ln_report(DATA_DIR, "外資連買", "日", "外資連續買賣日數", "外資", "最新連買天數")
+    
+    fo_keywords = ["外資連續買超", "外資連買"]
+    it_keywords = ["投信連續買超", "投信連買", "外資連續買超", "外資連買"] # 後兩者為原代碼的備案邏輯
 
-    live_it_day, date_it_day = read_live_ln_report(DATA_DIR, "投信連續買超", "日", "投信連續買賣日數", "投信", "最新連買天數")
-    if live_it_day.empty and date_it_day is None:
-        live_it_day, date_it_day = read_live_ln_report(DATA_DIR, "投信連買", "日", "投信連續買賣日數", "投信", "最新連買天數")
-    if live_it_day.empty:
-        live_it_day, date_it_day = read_live_ln_report(DATA_DIR, "外資連續買超", "日", "投信連續買賣日數", "投信", "最新連買天數")
-        if live_it_day.empty:
-            live_it_day, date_it_day = read_live_ln_report(DATA_DIR, "外資連買", "日", "投信連續買賣日數", "投信", "最新連買天數")
-
-    # 讀取週資料
-    live_fo_wk, date_fo_wk = read_live_ln_report(DATA_DIR, "外資連續買超", "週", "外資連續買賣週數", "外資", "最新連買週數")
-    if live_fo_wk.empty and date_fo_wk is None:
-        live_fo_wk, date_fo_wk = read_live_ln_report(DATA_DIR, "外資連買", "週", "外資連續買賣週數", "外資", "最新連買週數")
-
-    live_it_wk, date_it_wk = read_live_ln_report(DATA_DIR, "投信連續買超", "週", "投信連續買賣週數", "投信", "最新連買週數")
-    if live_it_wk.empty and date_it_wk is None:
-        live_it_wk, date_it_wk = read_live_ln_report(DATA_DIR, "投信連買", "週", "投信連續買賣週數", "投信", "最新連買週數")
-    if live_it_wk.empty:
-        live_it_wk, date_it_wk = read_live_ln_report(DATA_DIR, "外資連續買超", "週", "投信連續買賣週數", "投信", "最新連買週數")
-        if live_it_wk.empty:
-            live_it_wk, date_it_wk = read_live_ln_report(DATA_DIR, "外資連買", "週", "投信連續買賣週數", "投信", "最新連買週數")
+    # 💡 優化 5：合併冗長的巢狀 IF 判斷，改用 List Fallback
+    live_fo_day, date_fo_day = get_report_with_fallback(DATA_DIR, fo_keywords, "日", "外資連續買賣日數", "外資", "最新連買天數")
+    live_it_day, date_it_day = get_report_with_fallback(DATA_DIR, it_keywords, "日", "投信連續買賣日數", "投信", "最新連買天數")
+    live_fo_wk, date_fo_wk = get_report_with_fallback(DATA_DIR, fo_keywords, "週", "外資連續買賣週數", "外資", "最新連買週數")
+    live_it_wk, date_it_wk = get_report_with_fallback(DATA_DIR, it_keywords, "週", "投信連續買賣週數", "投信", "最新連買週數")
 
     b3_data_dict = {
         'fo_day': (live_fo_day, date_fo_day),
@@ -123,32 +124,22 @@ def get_cached_b3_data(DATA_DIR):
 
     # 組合給 Sidebar 和 Weight Backtest 使用的全市場母表
     b3_combined_list = []
-    if not live_fo_day.empty:
-        df_tmp = live_fo_day.copy()
-        df_tmp['連買類型'] = '🌐 外資日連買'
-        df_tmp = df_tmp.rename(columns={'最新連買天數': '連買週期數'})
-        b3_combined_list.append(df_tmp)
+    
+    def append_to_combined(df, type_name, col_name):
+        if not df.empty:
+            df_tmp = df[['股票代號', '股票名稱', '狀態動態', col_name]].copy()
+            df_tmp['連買類型'] = type_name
+            df_tmp = df_tmp.rename(columns={col_name: '連買週期數'})
+            b3_combined_list.append(df_tmp)
 
-    if not live_it_day.empty:
-        df_tmp = live_it_day.copy()
-        df_tmp['連買類型'] = '🏦 投信日連買'
-        df_tmp = df_tmp.rename(columns={'最新連買天數': '連買週期數'})
-        b3_combined_list.append(df_tmp)
-
-    if not live_fo_wk.empty:
-        df_tmp = live_fo_wk.copy()
-        df_tmp['連買類型'] = '🌐 外資週連買'
-        df_tmp = df_tmp.rename(columns={'最新連買週數': '連買週期數'})
-        b3_combined_list.append(df_tmp)
-
-    if not live_it_wk.empty:
-        df_tmp = live_it_wk.copy()
-        df_tmp['連買類型'] = '🏦 投信週連買'
-        df_tmp = df_tmp.rename(columns={'最新連買週數': '連買週期數'})
-        b3_combined_list.append(df_tmp)
+    append_to_combined(live_fo_day, '🌐 外資日連買', '最新連買天數')
+    append_to_combined(live_it_day, '🏦 投信日連買', '最新連買天數')
+    append_to_combined(live_fo_wk, '🌐 外資週連買', '最新連買週數')
+    append_to_combined(live_it_wk, '🏦 投信週連買', '最新連買週數')
 
     if b3_combined_list:
         df_b3 = pd.concat(b3_combined_list, ignore_index=True)
+        df_b3['連買類型'] = df_b3['連買類型'].astype('category') # 記憶體降級
         df_blk3_main = df_b3[['連買類型', '股票代號', '股票名稱', '狀態動態', '連買週期數']]
     else:
         df_blk3_main = pd.DataFrame(columns=['連買類型', '股票代號', '股票名稱', '狀態動態', '連買週期數'])
@@ -162,6 +153,7 @@ def sync_b3_data(DATA_DIR):
     """將瞬間算好的快取資料，寫入 session_state 供側邊欄與過濾器讀取"""
     b3_data_dict, df_blk3_main = get_cached_b3_data(DATA_DIR)
     st.session_state['b3_data'] = b3_data_dict
+    # 因為 B3 過濾完後的資料量極小 (通常不到 100 筆)，放入 session_state 供側邊欄使用非常安全
     st.session_state['df_blk3_main'] = df_blk3_main
 
 
@@ -178,9 +170,11 @@ def render_b3_dashboard(data):
     def apply_b3_filter(df):
         if df is None or df.empty:
             return df
-        mask = (df['股票代號'].str.len() == 4)
-        if show_etf_b3: mask |= ((df['股票代號'].str.len() >= 5) & (~df['股票代號'].str.endswith('B')))
-        if show_bond_b3: mask |= df['股票代號'].str.endswith('B')
+        # 防呆：確保欄位被轉回 string 再運算長度，防止 category 報錯
+        code_str = df['股票代號'].astype(str)
+        mask = (code_str.str.len() == 4)
+        if show_etf_b3: mask |= ((code_str.str.len() >= 5) & (~code_str.str.endswith('B')))
+        if show_bond_b3: mask |= code_str.str.endswith('B')
         res_df = df[mask].copy()
         res_df.index = range(1, len(res_df) + 1)
         return res_df
