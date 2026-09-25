@@ -289,7 +289,7 @@ def render_sidebar_broker_tracking(query, display_name):
     
     try:
         from utils.data_utils import calculate_chip_concentration
-        remote_csv_url = "https://raw.githubusercontent.com/goodinfo3583/tw-broker-data/main/data/broker/broker_history.csv"
+        
         df_trend = calculate_chip_concentration(remote_csv_url, str(query))
         
         if not df_trend.empty:
