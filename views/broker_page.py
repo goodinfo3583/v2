@@ -487,9 +487,22 @@ def render(STOCK_DICT=None):
         if not df_raw_all.empty:
             # 這裡的 target_stock 是字串，如果原先的 df_raw_all['stock_code'] 是整數 category 就會匹配失敗
             stock_raw = df_raw_all[df_raw_all['stock_code'] == target_stock].copy()
+    if selected_stock_str:
+        target_stock = selected_stock_str.split(" ")[0].strip()
+        display_name = selected_stock_str
+        
+        if not df_raw_all.empty:
+            stock_raw = df_raw_all[df_raw_all['stock_code'] == target_stock].copy()
             if not stock_raw.empty:
-                try: df_trend = calculate_chip_concentration(stock_raw)
-                except Exception: df_trend = pd.DataFrame()
-                if not df_trend.empty: 
-                    render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend)
-            else: st.warning(f"⚠️ 資料庫中找不到 {display_name} 的交易紀錄。")
+                try: 
+                    # 嘗試計算集中度
+                    df_trend = calculate_chip_concentration(stock_raw)
+                    if not df_trend.empty: 
+                        render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend)
+                    else:
+                        st.warning(f"⚠️ {display_name} 有交易紀錄，但算出的集中度資料為空。")
+                except Exception as e:
+                    # 把錯誤捕捉並顯示在畫面上，方便除錯
+                    st.error(f"❌ 在計算集中度時發生程式錯誤：\n\n {e}")
+            else: 
+                st.warning(f"⚠️ 資料庫中找不到 {display_name} 的交易紀錄。")
