@@ -25,13 +25,11 @@ def get_b5_latest_date(DATA_DIR):
                 global_latest = date_str
     return global_latest
 
-# 💡 效能救星 2：把 6 個級距的龐大合併與運算徹底快取
+# 💡 效能救星 2：把 6 個級距的龐大合併與運算徹底快取 (並導入極限記憶體瘦身)
 @st.cache_data(show_spinner=False, ttl=600)
 def process_major_shareholders(DATA_DIR, target_level):
-    """通用大戶資料產生器 (純後台版) - 統一處理 1000/800/600/400/200/100 張
-        特色：自動將下載的「X張以下」轉換為「X張以上」的大戶視角"""
+    """通用大戶資料產生器 (純後台版) - 統一處理 1000/800/600/400/200/100 張"""
     files = []
-    # 👇 擴充：加入 *.parquet 雙軌搜尋支援
     for ext in ('*.parquet', '*.csv', '*.CSV'):
         files.extend(glob.glob(os.path.join(DATA_DIR, f"*大股東*{ext}")))
     if not files: return pd.DataFrame()
@@ -43,7 +41,6 @@ def process_major_shareholders(DATA_DIR, target_level):
         groups.setdefault(key, []).append(f)
     
     merged, all_dates_4 = [], []
-    
     target_num = target_level.replace('1千', '1000').replace('千', '000')
 
     for prefix, fs in sorted(groups.items(), reverse=True):
@@ -52,10 +49,8 @@ def process_major_shareholders(DATA_DIR, target_level):
         
         for f in fs:
             df = None
-            # 👇 根據副檔名判斷讀取引擎
             if f.endswith('.parquet'):
-                try:
-                    df = pd.read_parquet(f)
+                try: df = pd.read_parquet(f)
                 except Exception: pass
             else:
                 for enc in ['utf-8-sig', 'big5', 'cp950', 'utf-8']:
@@ -66,38 +61,36 @@ def process_major_shareholders(DATA_DIR, target_level):
             
             if df is None or df.empty: continue
             
-            # 👇 統一的欄位清洗，並加入「剔除重複同名欄位」防呆機制
             df.columns = [re.sub(r'[\s\n\r\t\u3000\ufeff]+', '', str(c)) for c in df.columns]
             df = df.loc[:, ~df.columns.duplicated()]
+            
             c_code = next((c for c in df.columns if '代號' in c or '代碼' in c), None)
             c_name = next((c for c in df.columns if '名稱' in c), None)
             c_date = next((c for c in df.columns if '日期' in c), None)
             
-            # 優先找「超過」或「以上」
             c_abs = next((c for c in df.columns if (target_level in c or target_num in c) and ('%' in c or '比例' in c) and '增減' not in c and '差' not in c and ('超過' in c or '以上' in c)), None)
             c_delta = next((c for c in df.columns if (target_level in c or target_num in c) and ('增減' in c or '差' in c) and ('超過' in c or '以上' in c)), None)
             
             is_inverted = False
-            
-            # 若找不到「超過/以上」，改抓「以下」來反轉計算
             if not c_abs or not c_delta:
                 c_abs = next((c for c in df.columns if (target_level in c or target_num in c) and ('%' in c or '比例' in c) and '增減' not in c and '差' not in c and '以下' in c), None)
                 c_delta = next((c for c in df.columns if (target_level in c or target_num in c) and ('增減' in c or '差' in c) and '以下' in c), None)
-                if c_abs and c_delta:
-                    is_inverted = True 
+                if c_abs and c_delta: is_inverted = True 
             
             if not all([c_code, c_name, c_abs, c_delta]): continue
             
             try:
+                # 💡 記憶體瘦身：將代號與名稱轉為字串，稍後合併完轉 category
                 df['股票代號'] = df[c_code].astype(str).str.extract(r'(\d+)', expand=False)
                 df['股票名稱'] = df[c_name].astype(str).str.replace(r'^\d+', '', regex=True).str.strip()
                 
-                raw_abs = pd.to_numeric(df[c_abs].astype(str).str.replace('%', '', regex=False), errors='coerce')
-                raw_delta = pd.to_numeric(df[c_delta].astype(str).str.replace('+', '', regex=False).str.replace('%', '', regex=False), errors='coerce')
+                # 💡 記憶體瘦身：讀取時立刻降級為 float32
+                raw_abs = pd.to_numeric(df[c_abs].astype(str).str.replace('%', '', regex=False), errors='coerce').astype('float32')
+                raw_delta = pd.to_numeric(df[c_delta].astype(str).str.replace('+', '', regex=False).str.replace('%', '', regex=False), errors='coerce').astype('float32')
                 
                 if is_inverted:
-                    df['持股%'] = 100.0 - raw_abs.fillna(100.0)
-                    df['增減%'] = -1.0 * raw_delta.fillna(0.0)
+                    df['持股%'] = (100.0 - raw_abs.fillna(100.0)).astype('float32')
+                    df['增減%'] = (-1.0 * raw_delta.fillna(0.0)).astype('float32')
                 else:
                     df['持股%'] = raw_abs
                     df['增減%'] = raw_delta
@@ -111,7 +104,6 @@ def process_major_shareholders(DATA_DIR, target_level):
         
         if chunks:
             comb = pd.concat(chunks, ignore_index=True)
-            # 移除 '股票名稱'，僅依賴 '股票代號' 去重
             comb = comb.drop_duplicates(subset=['股票代號'], keep='first').reset_index(drop=True)
             
             date_4 = detected_date if detected_date else prefix[-4:]
@@ -127,7 +119,6 @@ def process_major_shareholders(DATA_DIR, target_level):
     if merged:
         master = merged[0]
         for m in merged[1:]: 
-            # 僅使用 '股票代號' 進行合併，並動態補齊舊股票名稱
             master = pd.merge(master, m, on='股票代號', how='outer', suffixes=('', '_old'))
             if '股票名稱_old' in master.columns:
                 master['股票名稱'] = master['股票名稱'].fillna(master['股票名稱_old'])
@@ -148,10 +139,11 @@ def process_major_shareholders(DATA_DIR, target_level):
             if val > -1.5: return "⚠️ 大減"
             return "🚨 劇減"
             
-        master['週動態'] = master[f"DELTA_{latest_date_4}"].apply(get_trend)
+        # 💡 將分類標籤轉為 category 節省空間
+        master['週動態'] = master[f"DELTA_{latest_date_4}"].apply(get_trend).astype('category')
         
         calc_cols = [f"DELTA_{d}" for d in sorted_dates_4[:6] if f"DELTA_{d}" in master.columns]
-        master['▼6周增減'] = master[calc_cols].sum(axis=1, min_count=1)
+        master['▼6周增減'] = master[calc_cols].sum(axis=1, min_count=1).astype('float32')
         
         rename_dict = {}
         cols_order = ['股票代號', '股票名稱', '週動態', '▼6周增減']
@@ -165,7 +157,12 @@ def process_major_shareholders(DATA_DIR, target_level):
                 cols_order.append(new_delta_name)
                 
         master = master.rename(columns=rename_dict)
-        final_df = master[[c for c in cols_order if c in master.columns]]
+        final_df = master[[c for c in cols_order if c in master.columns]].copy()
+        
+        # 💡 最後才把字串轉為 category，避免 merge 時的衝突
+        final_df['股票代號'] = final_df['股票代號'].astype('category')
+        final_df['股票名稱'] = final_df['股票名稱'].astype('category')
+        
         return final_df.sort_values(by=f"▼{latest_date_4}", ascending=False)
         
     return pd.DataFrame()
@@ -234,11 +231,12 @@ def render_b5_dashboard(STOCK_DICT):
             latest_col_400 = next((c for c in df_400.columns if c.startswith('▼') and '6周' not in c), None)
             
             if latest_col_1k and latest_col_400 and '▼6周增減' in df_1k.columns and '▼6周增減' in df_400.columns:
-                cond_1k = (pd.to_numeric(df_1k['▼6周增減'], errors='coerce').fillna(0) > 0) & (pd.to_numeric(df_1k[latest_col_1k], errors='coerce').fillna(0) > 0)
+                # 💡 效能救星：不再使用 slow 且耗記憶體的 astype(str).str.replace()，直接用底層 float32 計算！
+                cond_1k = (df_1k['▼6周增減'].fillna(0) > 0) & (df_1k[latest_col_1k].fillna(0) > 0)
                 base_df = df_1k[cond_1k][['股票代號', '股票名稱', '▼6周增減', latest_col_1k]].copy()
                 base_df = base_df.rename(columns={'▼6周增減': '6周增減(一千)', latest_col_1k: f"{latest_col_1k}(一千)"})
                 
-                cond_400 = (pd.to_numeric(df_400['▼6周增減'], errors='coerce').fillna(0) > 0) & (pd.to_numeric(df_400[latest_col_400], errors='coerce').fillna(0) > 0)
+                cond_400 = (df_400['▼6周增減'].fillna(0) > 0) & (df_400[latest_col_400].fillna(0) > 0)
                 df_400_filtered = df_400[cond_400][['股票代號', '▼6周增減', latest_col_400]].copy()
                 df_400_filtered = df_400_filtered.rename(columns={'▼6周增減': '6周增減(四百)', latest_col_400: f"{latest_col_400}(四百)"})
                 
@@ -261,12 +259,17 @@ def render_b5_dashboard(STOCK_DICT):
                             sub_800 = sub_800.rename(columns={'▼6周增減': '6周增減(八百)', latest_col_800: f"{latest_col_800}(八百)"})
                             resonance_df = pd.merge(resonance_df, sub_800, on='股票代號', how='left')
 
-                    resonance_df = resonance_df.fillna('None')
+                    # 針對數值欄位填補 0.0，文字欄位保留原本
+                    num_cols = resonance_df.select_dtypes(include=['float32', 'float64']).columns
+                    resonance_df[num_cols] = resonance_df[num_cols].fillna(0.0)
+                    
                     if '股票名稱' in resonance_df.columns: resonance_df = resonance_df.drop_duplicates(subset=['股票代號', '股票名稱'], keep='first')
                     else: resonance_df = resonance_df.drop_duplicates(subset=['股票代號'], keep='first')
                     
                     st.success(f"🔥 極度嚴苛過濾！找到了 **{len(resonance_df)}** 檔同步雙向做多的超級共振標的！")
-                    st.dataframe(resonance_df, use_container_width=True, hide_index=True)
+                    
+                    # 💡 畫面防護：統一使用 precision=2，避免 float32 小數點跑版
+                    st.dataframe(resonance_df.style.format(precision=2), use_container_width=True, hide_index=True)
 
                     # --- Treemap 繪圖區塊 ---
                     st.write("---")
@@ -285,10 +288,11 @@ def render_b5_dashboard(STOCK_DICT):
 
                         tm_b5_df = resonance_df.copy()
                         
-                        tm_b5_df['數值_6周'] = pd.to_numeric(tm_b5_df['6周增減(一千)'].astype(str).str.replace('+', '', regex=False).str.replace('%', '', regex=False), errors='coerce').fillna(0.0)
-                        tm_b5_df['數值_最新週'] = pd.to_numeric(tm_b5_df[target_color_col].astype(str).str.replace('+', '', regex=False).str.replace('%', '', regex=False), errors='coerce').fillna(0.0)
-                        tm_b5_df['數值_400_最新'] = pd.to_numeric(tm_b5_df[f"{latest_col_400}(四百)"].astype(str).str.replace('+', '', regex=False).str.replace('%', '', regex=False), errors='coerce').fillna(0.0)
-                        tm_b5_df['數值_400_6周'] = pd.to_numeric(tm_b5_df['6周增減(四百)'].astype(str).str.replace('+', '', regex=False).str.replace('%', '', regex=False), errors='coerce').fillna(0.0)
+                        # 💡 效能解放：不需要再做 slow string replace，因為欄位原本就是數字
+                        tm_b5_df['數值_6周'] = tm_b5_df['6周增減(一千)']
+                        tm_b5_df['數值_最新週'] = tm_b5_df[target_color_col]
+                        tm_b5_df['數值_400_最新'] = tm_b5_df[f"{latest_col_400}(四百)"]
+                        tm_b5_df['數值_400_6周'] = tm_b5_df['6周增減(四百)']
 
                         if "6周增減" in b5_filter: tm_b5_df = tm_b5_df.nlargest(top_n, '數值_6周')
                         elif "依 ▼" in b5_filter or "依 最新" in b5_filter or target_color_col in b5_filter: tm_b5_df = tm_b5_df.nlargest(top_n, '數值_最新週')
@@ -353,14 +357,13 @@ def render_b5_dashboard(STOCK_DICT):
                             st.caption("游標懸停可查看大戶持股明細。")
                             tags_html = ""
                             
-                            def safe_float_convert(val):
-                                try: return float(str(val).replace('+', '').replace('%', '').replace(',', '').strip())
-                                except: return 0.0
-                            
                             for _, r in b5_excluded_etfs.iterrows():
                                 name, sid = html.escape(str(r.get('股票名稱', '')), quote=True), html.escape(str(r.get('股票代號', '')), quote=True)
-                                num_6w, num_w = safe_float_convert(r.get('6周增減(一千)', '0')), safe_float_convert(r.get(target_color_col, '0'))
-                                num_400_w, num_400_6w = safe_float_convert(r.get(f"{latest_col_400}(四百)", '0')), safe_float_convert(r.get('6周增減(四百)', '0'))
+                                # 💡 直接存取原本已經是 float 的數值
+                                num_6w = float(r.get('6周增減(一千)', 0.0))
+                                num_w = float(r.get(target_color_col, 0.0))
+                                num_400_w = float(r.get(f"{latest_col_400}(四百)", 0.0))
+                                num_400_6w = float(r.get('6周增減(四百)', 0.0))
                                 
                                 if "6周增減" in b5_filter: d_val, label_text = num_6w, "6周"
                                 else: d_val, label_text = num_w, "千張"
@@ -384,6 +387,7 @@ def render_b5_dashboard(STOCK_DICT):
     # ================= TAB 2: 雙引擎共振 =================
     with tab_resonance:
         if not filtered_1000_df.empty and not filtered_400_df.empty:
+            # 💡 週動態已經是 category，文字過濾可以直接用 pandas 內建
             df1_inc = filtered_1000_df[filtered_1000_df['週動態'].astype(str).str.contains('增', na=False)].copy()
             df2_inc = filtered_400_df[filtered_400_df['週動態'].astype(str).str.contains('增', na=False)].copy()
 
@@ -424,28 +428,29 @@ def render_b5_dashboard(STOCK_DICT):
                 if sort_col: sync = sync.sort_values(by=sort_col, ascending=False)
 
                 st.success(f"這是強烈的大腿訊號！共有 **{len(sync)}** 檔標的出現大腿雷達共振 (千張與四百張同時增加)！")
-                st.dataframe(sync, use_container_width=True, hide_index=True)
+                # 💡 統一加上 precision=2 避免跑版
+                st.dataframe(sync.style.format(precision=2), use_container_width=True, hide_index=True)
             else: st.info("⚪ 最新一週目前沒有「千張與四百張」同時增加的共振標的。")
         else: st.warning("⚠️ 請確保 1000 張與 400 張資料皆有成功載入。")
 
-    # ================= TAB 3-8: 純資料表格 =================
+    # ================= TAB 3-8: 純資料表格 (皆掛上 style.format 防止跑版) =================
     with tab_1000:
-        if not filtered_1000_df.empty: st.dataframe(filtered_1000_df, use_container_width=True, hide_index=True)
+        if not filtered_1000_df.empty: st.dataframe(filtered_1000_df.style.format(precision=2), use_container_width=True, hide_index=True)
         else: st.info("⚪ 暫無 1000張大戶資料。")
     with tab_800:
-        if not filtered_800_df.empty: st.dataframe(filtered_800_df, use_container_width=True, hide_index=True)
+        if not filtered_800_df.empty: st.dataframe(filtered_800_df.style.format(precision=2), use_container_width=True, hide_index=True)
         else: st.info("⚪ 暫無 800張大戶資料。")
     with tab_600:
-        if not filtered_600_df.empty: st.dataframe(filtered_600_df, use_container_width=True, hide_index=True)
+        if not filtered_600_df.empty: st.dataframe(filtered_600_df.style.format(precision=2), use_container_width=True, hide_index=True)
         else: st.info("⚪ 暫無 600張大戶資料。")
     with tab_400:
-        if not filtered_400_df.empty: st.dataframe(filtered_400_df, use_container_width=True, hide_index=True)
+        if not filtered_400_df.empty: st.dataframe(filtered_400_df.style.format(precision=2), use_container_width=True, hide_index=True)
         else: st.info("⚪ 暫無 400張大戶資料。")
     with tab_200:
-        if not filtered_200_df.empty: st.dataframe(filtered_200_df, use_container_width=True, hide_index=True)
+        if not filtered_200_df.empty: st.dataframe(filtered_200_df.style.format(precision=2), use_container_width=True, hide_index=True)
         else: st.info("⚪ 暫無 200張大戶資料。")
     with tab_100:
-        if not filtered_100_df.empty: st.dataframe(filtered_100_df, use_container_width=True, hide_index=True)
+        if not filtered_100_df.empty: st.dataframe(filtered_100_df.style.format(precision=2), use_container_width=True, hide_index=True)
         else: st.info("⚪ 暫無 100張大戶資料。")
 
 
