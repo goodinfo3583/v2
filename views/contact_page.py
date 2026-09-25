@@ -4,12 +4,13 @@ import pandas as pd
 import datetime
 import os
 import base64
+import gc  # 💡 引入垃圾回收機制
 
 # 引入剛剛擴充好的隱形按鈕引擎
 from components.nav_manager import render_proxy_buttons
 
-# 💡 效能救星 1：將圖片讀取與轉碼加上快取，避免切換頁面時重複讀取硬碟
-@st.cache_data(show_spinner=False)
+# 💡 效能救星 1：將圖片讀取與轉碼加上快取，避免切換頁面時重複讀取硬碟 (設定存活期 1 天即可)
+@st.cache_data(show_spinner=False, ttl=86400)
 def get_image_base64(image_path):
     """專屬於此頁面的圖片轉碼微型工具"""
     if os.path.exists(image_path):
@@ -35,24 +36,40 @@ def render_contact_form(conn, SHEET_URL):
             if not message_body.strip():
                 st.error("⚠️ 傳送失敗：紙條上似乎空無一字喔！")
             else:
-                try:
+                # 💡 體驗優化：加上轉圈圈動畫，掩蓋 Google Sheets 寫入的網路延遲
+                with st.spinner("🕊️ 派對信使正在遞送紙條..."):
                     try:
-                        # 送出時才去讀取資料庫，並使用 ttl=0 確保拿到最新資料避免覆蓋
-                        old_contact_df = conn.read(spreadsheet=SHEET_URL, worksheet="聯絡我們", ttl=0)
-                        old_contact_df = old_contact_df.dropna(how="all")
-                    except:
-                        old_contact_df = pd.DataFrame(columns=["時間", "稱呼", "信箱", "內容"])
-                    
-                    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    new_data = pd.DataFrame([{"時間": now_str, "稱呼": sender_name.strip() if sender_name else "匿名使用者", "信箱": sender_email.strip() if sender_email else "-", "內容": message_body.strip()}])
-                    
-                    final_contact_df = pd.concat([old_contact_df, new_data], ignore_index=True)
-                    conn.update(spreadsheet=SHEET_URL, worksheet="聯絡我們", data=final_contact_df)
-                    
-                    st.toast("您的訊息已悄悄送達派對後台...", icon="🦇")
-                    st.success("✨ 感謝回報！您的建議是盛宴最棒的點綴。")
-                except Exception as e:
-                    st.error(f"❌ 傳送失敗，後台連線異常：{str(e)}")
+                        try:
+                            # 💡 記憶體瘦身：加上 usecols=[0,1,2,3]，只讀取前 4 個有資料的欄位，防止讀入無限空白格
+                            old_contact_df = conn.read(spreadsheet=SHEET_URL, worksheet="聯絡我們", ttl=0, usecols=[0,1,2,3])
+                            old_contact_df = old_contact_df.dropna(how="all")
+                        except:
+                            old_contact_df = pd.DataFrame(columns=["時間", "稱呼", "信箱", "內容"])
+                        
+                        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        new_data = pd.DataFrame([{
+                            "時間": now_str, 
+                            "稱呼": sender_name.strip() if sender_name else "匿名使用者", 
+                            "信箱": sender_email.strip() if sender_email else "-", 
+                            "內容": message_body.strip()
+                        }])
+                        
+                        final_contact_df = pd.concat([old_contact_df, new_data], ignore_index=True)
+                        # 強制轉為純文字，確保寫入 GSheets 不會產生格式錯誤
+                        final_contact_df = final_contact_df.astype(str)
+                        
+                        conn.update(spreadsheet=SHEET_URL, worksheet="聯絡我們", data=final_contact_df)
+                        
+                        # 💡 效能救星 3：上傳完畢後，立刻手動抹除 DataFrame 記憶體，防止殭屍記憶體殘留！
+                        del old_contact_df
+                        del new_data
+                        del final_contact_df
+                        gc.collect()
+                        
+                        st.toast("您的訊息已悄悄送達派對後台...", icon="🦇")
+                        st.success("✨ 感謝回報！您的建議是盛宴最棒的點綴。")
+                    except Exception as e:
+                        st.error(f"❌ 傳送失敗，後台連線異常：{str(e)}")
 
 
 def show_contact_page(conn, SHEET_URL):
