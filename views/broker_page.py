@@ -343,7 +343,7 @@ def render(STOCK_DICT=None):
         latest_date = pd.Series(df_raw_all['trade_date'].unique()).dropna().astype(str).max()
 
     st.markdown(f"""券商動向基準日：{latest_date}""", unsafe_allow_html=True)
-    # 【已刪除】：強制刷新最新資料的 columns 和 button 區塊
+
     st.markdown("### 🌍 全市場連買分點快搜")
     scan_tab1, scan_tab2 = st.tabs(["🔹 Top 15主力買超排行", "🔹 單一主力成本分析(豆腐好吃)"])
 
