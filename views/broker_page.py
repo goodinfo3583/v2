@@ -43,9 +43,10 @@ def load_full_blood_broker_history():
     if not df.empty:
         df = df.rename(columns={'日期': 'trade_date', '股票代號': 'stock_code', '券商名稱': 'broker_name', '券商代號': 'broker', '買賣超股數': 'net_vol_shares'})
         
-        # 💡 記憶體瘦身核心：類別化 (Category)
-        df['stock_code'] = df['stock_code'].astype('category')
-        df['broker'] = df['broker'].astype('category')
+        # 💡 記憶體瘦身核心：類別化 (Category) 
+        # 【修正】先轉為字串再轉category，避免後續字串搜尋時因整數型態而比對失敗
+        df['stock_code'] = df['stock_code'].astype(str).astype('category')
+        df['broker'] = df['broker'].astype(str).astype('category')
         df['broker_name'] = df['broker_name'].astype('category')
         
         # 💡 將 trade_date 轉為「有順序的類別 (Ordered Category)」節省空間，並支援排序與 max()
@@ -341,25 +342,8 @@ def render(STOCK_DICT=None):
         # 💡 安全抓取最新日期，避免受舊版無順序快取的影響
         latest_date = pd.Series(df_raw_all['trade_date'].unique()).dropna().astype(str).max()
 
-    st.markdown(f"""
-    <div style="background: linear-gradient(90deg, rgba(15,23,42,1) 0%, rgba(14,165,233,0.3) 50%, rgba(15,23,42,1) 100%); 
-                border-top: 1px solid #38bdf8; border-bottom: 1px solid #38bdf8; padding: 15px 20px; 
-                border-radius: 10px; text-align: center; box-shadow: 0px 0px 20px rgba(56, 189, 248, 0.2); margin-bottom: 20px;">
-        <h2 style="color: #e0f2fe; margin: 0; letter-spacing: 2px; text-shadow: 0 0 15px rgba(56, 189, 248, 0.8);">
-            券商動向
-            <span style="color:#00D2FF; font-size:16px; font-weight:500; margin-left:12px; text-shadow: none;">基準日：{latest_date}</span>
-        </h2>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # 🌟 增加強制清除快取按鈕 (解決 HF 上傳後要等 1 小時才會更新的問題)
-    col_btn1, col_btn2 = st.columns([8, 2])
-    with col_btn2:
-        if st.button("🔄 強制刷新最新資料", use_container_width=True):
-            fetch_parquet_from_hf.clear()
-            fetch_text_from_hf.clear()
-            load_full_blood_broker_history.clear()
-            st.rerun()
+    st.markdown(f"""券商動向基準日：{latest_date}""", unsafe_allow_html=True)
+    # 【已刪除】：強制刷新最新資料的 columns 和 button 區塊
 
     st.markdown("### 🌍 全市場連買分點快搜")
     scan_tab1, scan_tab2 = st.tabs(["🔹 Top 15主力買超排行", "🔹 單一主力成本分析(豆腐好吃)"])
@@ -486,7 +470,7 @@ def render(STOCK_DICT=None):
     st.markdown("---")
 
     # 🌟 3. 個股查詢器 🌟
-    st.markdown("### 🔍 個股查詢與走勢圖")
+    st.markdown("### 🔍 個股分點買超及集中度查詢")
     stock_options = []
     if STOCK_DICT:
         unique_options = {f"{v['id']} {v['name']}" for v in STOCK_DICT.values() if len(str(v['id'])) <= 4}
@@ -501,6 +485,7 @@ def render(STOCK_DICT=None):
         display_name = selected_stock_str
         
         if not df_raw_all.empty:
+            # 這裡的 target_stock 是字串，如果原先的 df_raw_all['stock_code'] 是整數 category 就會匹配失敗
             stock_raw = df_raw_all[df_raw_all['stock_code'] == target_stock].copy()
             if not stock_raw.empty:
                 try: df_trend = calculate_chip_concentration(stock_raw)
