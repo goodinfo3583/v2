@@ -324,13 +324,11 @@ def render_sidebar_broker_tracking(query, display_name):
                     if hasattr(df_trend_disp.style, 'map'):
                         styled_trend = df_trend_disp.style.map(color_trend, subset=['淨買超(張)', '集中度(%)']).format({'淨買超(張)': "{:,.0f}", '集中度(%)': "{:.2f}"})
                     else:
-                        styled_trend = df_trend_disp.style.applymap(color_trend, subset=['淨買超(張)', '集中度(%)']).format({'淨買超(張)': "{:,.0f}", '集中度(%)': "{:.2f}"})
-                    
+                        styled_trend = df_trend_disp.style.applymap(color_trend, subset=['淨買超(張)', '集中度(%)']).format({'淨買超(張)': "{:,.0f}", '集中度(%)': "{:.2f}"})                    
                     st.dataframe(styled_trend, use_container_width=True, hide_index=True)
-                
                 st.markdown("", unsafe_allow_html=True)
-    else:
-        st.write("⚪ 尚無近期集中度資料")
+        else:
+            st.write("⚪ 尚無近期集中度資料")
     except Exception as e:
         st.error(f"側邊欄集中度模組錯誤: {e}")
 ##
