@@ -74,7 +74,7 @@ def load_full_blood_broker_history():
 
     return df
 
-# 🌟 2. 純本地記憶體計算集中度與股價走勢 (零外部連線、零 yfinance、極速且不炸記憶體)
+# 🌟 2. 純本地記憶體計算集中度與股價走勢
 def calculate_local_chip_concentration(stock_raw):
     if stock_raw.empty:
         return pd.DataFrame()
@@ -84,7 +84,6 @@ def calculate_local_chip_concentration(stock_raw):
     df_calc['trade_date_str'] = df_calc['trade_date'].astype(str)
     
     daily_records = []
-    broker_col = 'broker_name' if 'broker_name' in df_calc.columns else 'broker'
 
     # 依交易日期分組計算每日數據
     grouped = df_calc.groupby('trade_date_str')
@@ -92,7 +91,7 @@ def calculate_local_chip_concentration(stock_raw):
         total_buy_amt = group['總買進金額'].sum() if '總買進金額' in group.columns else 0
         total_buy_vol = group['總買進股數'].sum() if '總買進股數' in group.columns else 0
         
-        # 💡 透過自身大表的總買進金額/股數反推當日真實市場均價 (完全不用 yfinance)
+        # 💡 反推當日真實市場均價
         stock_price = round(total_buy_amt / total_buy_vol, 2) if total_buy_vol > 0 else np.nan
         
         # 總成交張數 = 所有分點買賣股數加總的一半 / 1000
@@ -103,21 +102,23 @@ def calculate_local_chip_concentration(stock_raw):
         buy_top15 = group[group['net_vol'] > 0].nlargest(15, 'net_vol')['net_vol'].sum()
         sell_top15 = group[group['net_vol'] < 0].nsmallest(15, 'net_vol')['net_vol'].abs().sum()
         
-        net_buy = round(float(group['net_vol'].sum()), 1)
+        major_diff = buy_top15 - sell_top15
+        # 💡 修正 1：主力淨買超 = 前15大買超 減去 前15大賣超 (解決顯示為0的問題)
+        net_buy = int(round(major_diff)) 
         
         # 集中度(%) = (買超前15 - 賣超前15) / 當日總成交量 * 100
         if total_trade_vol > 0:
-            conc = round(float((buy_top15 - sell_top15) / total_trade_vol * 100), 2)
+            conc = round(float(major_diff / total_trade_vol * 100), 2)
         else:
             conc = 0.0
             
         daily_records.append({
             'trade_date': t_date,
-            'net_buy': int(round(net_buy)),
+            'net_buy': net_buy,
             'concentration_%': conc,
             'stock_price': stock_price,
             'total_vol': total_trade_vol,
-            'major_diff': (buy_top15 - sell_top15)
+            'major_diff': major_diff
         })
 
     df_trend = pd.DataFrame(daily_records)
@@ -157,7 +158,7 @@ def fmt_int(val):
 @st.fragment
 def render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend):
     latest_data = df_trend.iloc[-1]
-    st.metric(label=f"{latest_data['trade_date']} 最新券商分點集中度", value=f"{latest_data['concentration_%']}%", delta=f"淨買超 {latest_data['net_buy']:,} 張")
+    st.metric(label=f"{latest_data['trade_date']} 最新券商分點集中度", value=f"{latest_data['concentration_%']}%", delta=f"主力淨買超 {latest_data['net_buy']:,} 張")
     
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
@@ -196,10 +197,11 @@ def render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend):
         
         if not top_broker_agg.empty and top_broker_agg.iloc[0]['淨買張數'] > 0 and top_broker_agg.iloc[0]['總買進股數'] > 0:
             top1_name = top_broker_agg.index[0]
-            top1_cost = round(top_broker_agg.iloc[0]['總買進金額'] / top_broker_agg.iloc[0]['總買進股數'], 2)
+            top1_cost = top_broker_agg.iloc[0]['總買進金額'] / top_broker_agg.iloc[0]['總買進股數']
+            # 💡 修正 2：在 f-string 中加入 {:.2f} 強制顯示小數點後兩位
             fig_trend.add_hline(
                 y=top1_cost, line_color="#FF4B4B", line_width=1.5, line_dash="dash", 
-                annotation_text=f"🚩 最大主力 ({top1_name}) 防守成本: {top1_cost}元", 
+                annotation_text=f"🚩 最大主力 ({top1_name}) 防守成本: {top1_cost:.2f}元", 
                 annotation_position="bottom right", 
                 annotation_font=dict(color="#FF4B4B"), 
                 secondary_y=False
@@ -581,8 +583,6 @@ def render(STOCK_DICT=None):
             
             if not stock_raw.empty:
                 try: 
-                    # 💡 核心亮點：直接利用自身 HF Parquet 資料庫在記憶體秒算！
-                    # 徹底拋棄 yfinance 與 GitHub 死掉的 CSV，日期直接更新到 9/24 最新！
                     df_trend = calculate_local_chip_concentration(stock_raw)
                     
                     if not df_trend.empty: 
