@@ -289,45 +289,49 @@ def render_sidebar_broker_tracking(query, display_name):
     if not available_dates: return
     
     try:
-        from utils.data_utils import calculate_chip_concentration
-        # 💡 同步主頁面成功的方法，重新加回 remote_csv_url 保證算出趨勢表
-        remote_csv_url = "https://raw.githubusercontent.com/goodinfo3583/tw-broker-data/main/data/broker/broker_history.csv"
-        df_trend = calculate_chip_concentration(remote_csv_url, str(query))
+        # 💡 解答關鍵：直接從 broker_page 借用「已經算好且快取好」的趨勢大表
+        # 徹底拋棄舊的 utils.calculate_chip_concentration 與 GitHub 網址！
+        from views.broker_page import load_stock_trends
+        df_trends_all = load_stock_trends()
         
-        if not df_trend.empty and 'concentration_%' in df_trend.columns:
-            latest_data = df_trend.iloc[-1]
-            m_col1, m_col2 = st.columns(2)
-            with m_col1:
-                st.metric(label=f"最新集中度 ({latest_data['trade_date']})", value=f"{latest_data['concentration_%']}%")
-            with m_col2:
-                net_buy_val = latest_data['net_buy']
-                net_str = f"+{net_buy_val:,}" if net_buy_val > 0 else f"{net_buy_val:,}"
-                st.metric(label="主體淨買賣超", value=f"{net_str} 張")
+        if not df_trends_all.empty:
+            # 取出該檔股票的趨勢資料
+            df_trend = df_trends_all[df_trends_all['stock_code'].astype(str) == str(query)].copy()
             
-            with st.expander("📅 展開查看：近 60 日集中度與淨買超", expanded=False):
-                df_trend_disp = df_trend.sort_values('trade_date', ascending=False).head(60).copy()
-                df_trend_disp = df_trend_disp[['trade_date', 'net_buy', 'concentration_%']]
-                df_trend_disp.columns = ['交易日期', '淨買超(張)', '集中度(%)']
+            if not df_trend.empty and 'concentration_%' in df_trend.columns:
+                latest_data = df_trend.iloc[-1]
+                m_col1, m_col2 = st.columns(2)
+                with m_col1:
+                    st.metric(label=f"最新集中度 ({latest_data['trade_date']})", value=f"{latest_data['concentration_%']}%")
+                with m_col2:
+                    net_buy_val = latest_data['net_buy']
+                    net_str = f"+{net_buy_val:,}" if net_buy_val > 0 else f"{net_buy_val:,}"
+                    st.metric(label="主體淨買賣超", value=f"{net_str} 張")
                 
-                def color_trend(val):
-                    try:
-                        v = float(val)
-                        if v > 0: return 'color: #FF4B4B;'
-                        elif v < 0: return 'color: #00E272;'
-                    except: pass
-                    return 'color: #94A3B8;'
+                with st.expander("📅 展開查看：近 60 日集中度與淨買超", expanded=False):
+                    df_trend_disp = df_trend.sort_values('trade_date', ascending=False).head(60).copy()
+                    df_trend_disp = df_trend_disp[['trade_date', 'net_buy', 'concentration_%']]
+                    df_trend_disp.columns = ['交易日期', '淨買超(張)', '集中度(%)']
+                    
+                    def color_trend(val):
+                        try:
+                            v = float(val)
+                            if v > 0: return 'color: #FF4B4B;'
+                            elif v < 0: return 'color: #00E272;'
+                        except: pass
+                        return 'color: #94A3B8;'
+                    
+                    if hasattr(df_trend_disp.style, 'map'):
+                        styled_trend = df_trend_disp.style.map(color_trend, subset=['淨買超(張)', '集中度(%)']).format({'淨買超(張)': "{:,.0f}", '集中度(%)': "{:.2f}"})
+                    else:
+                        styled_trend = df_trend_disp.style.applymap(color_trend, subset=['淨買超(張)', '集中度(%)']).format({'淨買超(張)': "{:,.0f}", '集中度(%)': "{:.2f}"})
+                    
+                    st.dataframe(styled_trend, use_container_width=True, hide_index=True)
                 
-                if hasattr(df_trend_disp.style, 'map'):
-                    styled_trend = df_trend_disp.style.map(color_trend, subset=['淨買超(張)', '集中度(%)']).format({'淨買超(張)': "{:,.0f}", '集中度(%)': "{:.2f}"})
-                else:
-                    styled_trend = df_trend_disp.style.applymap(color_trend, subset=['淨買超(張)', '集中度(%)']).format({'淨買超(張)': "{:,.0f}", '集中度(%)': "{:.2f}"})
-                
-                st.dataframe(styled_trend, use_container_width=True, hide_index=True)
-            
-            st.markdown("", unsafe_allow_html=True)
-    except Exception as e:  
-
-        # 💡 將原本的 pass 改成 st.error，若再發生錯誤就不會靜默消失
+                st.markdown("", unsafe_allow_html=True)
+    else:
+        st.write("⚪ 尚無近期集中度資料")
+    except Exception as e:
         st.error(f"側邊欄集中度模組錯誤: {e}")
 ##
     recent_dates = available_dates[:60]

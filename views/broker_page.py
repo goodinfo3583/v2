@@ -158,20 +158,29 @@ def render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend):
     
     with st.expander("📅 展開查看：近 60 日集中度與淨買超歷史表", expanded=False):
         df_trend_disp = df_trend.sort_values('trade_date', ascending=False).head(60).copy()
+        
+        # 💡 新增：把 5日、10日、20日 集中度加進來顯示
         cols_to_show = ['trade_date', 'net_buy', 'concentration_%']
-        if 'stock_price' in df_trend_disp.columns:
-            cols_to_show.append('stock_price')
-            
+        optional_cols = ['5日集中度(%)', '10日集中度(%)', '20日集中度(%)', 'stock_price']
+        
+        for col in optional_cols:
+            if col in df_trend_disp.columns:
+                cols_to_show.append(col)
+                
         df_trend_disp = df_trend_disp[cols_to_show]
-        rename_dict = {'trade_date': '交易日期', 'net_buy': '淨買超(張)', 'concentration_%': '集中度(%)'}
+        
+        rename_dict = {'trade_date': '交易日期', 'net_buy': '淨買超(張)', 'concentration_%': '單日集中度(%)'}
         if 'stock_price' in cols_to_show: rename_dict['stock_price'] = '市場均價'
         
         df_trend_disp = df_trend_disp.rename(columns=rename_dict)
-        format_dict = {'淨買超(張)': fmt_float, '集中度(%)': "{:.2f}"}
+        
+        format_dict = {'淨買超(張)': fmt_float, '單日集中度(%)': "{:.2f}"}
         if '市場均價' in df_trend_disp.columns: format_dict['市場均價'] = "{:.2f}"
+        if '5日集中度(%)' in df_trend_disp.columns: format_dict['5日集中度(%)'] = "{:.2f}"
+        if '10日集中度(%)' in df_trend_disp.columns: format_dict['10日集中度(%)'] = "{:.2f}"
+        if '20日集中度(%)' in df_trend_disp.columns: format_dict['20日集中度(%)'] = "{:.2f}"
             
         st.dataframe(df_trend_disp.style.format(format_dict), use_container_width=True, hide_index=True)
-
     st.markdown("---")
     st.subheader(f"🔍 {display_name} 券商分點進出明細")
     if broker_col is None: return st.error("⚠️ 無法在資料庫中找到「券商名稱」欄位！")
