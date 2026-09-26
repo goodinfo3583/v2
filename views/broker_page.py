@@ -3,14 +3,14 @@ import streamlit as st
 import pandas as pd
 import requests
 import urllib.parse
-from utils.data_utils import calculate_chip_concentration
+import numpy as np
 
 # ==========================================
 # ⚙️ 基礎設定與快取讀取引擎
 # ==========================================
 HF_BASE_URL = "https://huggingface.co/datasets/goodinfo3583/tw-broker-parquet/resolve/main"
 
-# 🚀 共用遠端讀取函數 (僅供"小檔案"使用，避免大檔案造成雙重快取佔用記憶體)
+# 🚀 共用遠端讀取函數 (僅供"小檔案"使用)
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_parquet_from_hf(file_name):
     url = f"{HF_BASE_URL}/{urllib.parse.quote(file_name)}"
@@ -30,10 +30,9 @@ def fetch_text_from_hf(file_name):
         pass
     return "6"
 
-# 🌟 1. 滿血版 Parquet 讀取引擎 (極限瘦身版，專門處理 190MB 大檔)
+# 🌟 1. 滿血版 Parquet 讀取引擎 (極限瘦身版，保留計算所需欄位)
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_full_blood_broker_history():
-    # 直接讀取，不透過 fetch_parquet_from_hf，避免在系統產生兩份龐大快取
     url = f"{HF_BASE_URL}/{urllib.parse.quote('broker_summary_master.parquet')}"
     try:
         df = pd.read_parquet(url)
@@ -41,38 +40,105 @@ def load_full_blood_broker_history():
         return pd.DataFrame()
 
     if not df.empty:
-        df = df.rename(columns={'日期': 'trade_date', '股票代號': 'stock_code', '券商名稱': 'broker_name', '券商代號': 'broker', '買賣超股數': 'net_vol_shares'})
+        df = df.rename(columns={
+            '日期': 'trade_date', 
+            '股票代號': 'stock_code', 
+            '券商名稱': 'broker_name', 
+            '券商代號': 'broker', 
+            '買賣超股數': 'net_vol_shares'
+        })
         
-        # 💡 記憶體瘦身核心：類別化 (Category) 
-        # 【修正】先轉為字串再轉category，避免後續字串搜尋時因整數型態而比對失敗
+        # 💡 記憶體瘦身核心：類別化 (Category)
         df['stock_code'] = df['stock_code'].astype(str).astype('category')
         df['broker'] = df['broker'].astype(str).astype('category')
-        df['broker_name'] = df['broker_name'].astype('category')
+        df['broker_name'] = df['broker_name'].astype(str).astype('category')
         
-        # 💡 將 trade_date 轉為「有順序的類別 (Ordered Category)」節省空間，並支援排序與 max()
+        # 💡 日期標準化處理：轉成 YYYY-MM-DD 字串以利後續運算與排序
         if pd.api.types.is_datetime64_any_dtype(df['trade_date']):
             temp_dates = df['trade_date'].dt.strftime('%Y-%m-%d')
         else:
-            temp_dates = df['trade_date'].astype(str)
+            temp_dates = df['trade_date'].astype(str).str.slice(0, 10)
             
         unique_dates = sorted([d for d in temp_dates.unique() if pd.notna(d) and d != 'nan'])
         df['trade_date'] = pd.Categorical(temp_dates, categories=unique_dates, ordered=True)
 
-        # 💡 數值降級 (Downcast)：將 float64 降級為 float32
+        # 💡 數值降級 (Downcast)：將 float64 降級為 float32 節省一半以上記憶體
         df['net_vol'] = (df['net_vol_shares'] / 1000).astype('float32')
         df['side'] = df['net_vol'].apply(lambda x: 'buy' if x > 0 else 'sell').astype('category')
         
-        # 針對其他肥大的金額與股數欄位進行 float32 降級
         for col in ['總買進金額', '總買進股數', '總賣出金額', '總賣出股數', '買賣超金額']:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], downcast='float').astype('float32')
         
-        # 🗑️ 刪除已轉換完畢且不需要的原始大數字欄位，進一步釋放記憶體
         df = df.drop(columns=['net_vol_shares'], errors='ignore')
 
     return df
 
-# 🌟 2. 標籤與共用格式函數
+# 🌟 2. 純本地記憶體計算集中度與股價走勢 (零外部連線、零 yfinance、極速且不炸記憶體)
+def calculate_local_chip_concentration(stock_raw):
+    if stock_raw.empty:
+        return pd.DataFrame()
+
+    # 確保 trade_date 為普通字串以便 groupby
+    df_calc = stock_raw.copy()
+    df_calc['trade_date_str'] = df_calc['trade_date'].astype(str)
+    
+    daily_records = []
+    broker_col = 'broker_name' if 'broker_name' in df_calc.columns else 'broker'
+
+    # 依交易日期分組計算每日數據
+    grouped = df_calc.groupby('trade_date_str')
+    for t_date, group in grouped:
+        total_buy_amt = group['總買進金額'].sum() if '總買進金額' in group.columns else 0
+        total_buy_vol = group['總買進股數'].sum() if '總買進股數' in group.columns else 0
+        
+        # 💡 透過自身大表的總買進金額/股數反推當日真實市場均價 (完全不用 yfinance)
+        stock_price = round(total_buy_amt / total_buy_vol, 2) if total_buy_vol > 0 else np.nan
+        
+        # 總成交張數 = 所有分點買賣股數加總的一半 / 1000
+        total_trade_shares = (group['總買進股數'].sum() + group['總賣出股數'].sum()) / 2 if '總買進股數' in group.columns else 0
+        total_trade_vol = total_trade_shares / 1000 if total_trade_shares > 0 else group['net_vol'].abs().sum() / 2
+        
+        # 主力買超前15與賣超前15
+        buy_top15 = group[group['net_vol'] > 0].nlargest(15, 'net_vol')['net_vol'].sum()
+        sell_top15 = group[group['net_vol'] < 0].nsmallest(15, 'net_vol')['net_vol'].abs().sum()
+        
+        net_buy = round(float(group['net_vol'].sum()), 1)
+        
+        # 集中度(%) = (買超前15 - 賣超前15) / 當日總成交量 * 100
+        if total_trade_vol > 0:
+            conc = round(float((buy_top15 - sell_top15) / total_trade_vol * 100), 2)
+        else:
+            conc = 0.0
+            
+        daily_records.append({
+            'trade_date': t_date,
+            'net_buy': int(round(net_buy)),
+            'concentration_%': conc,
+            'stock_price': stock_price,
+            'total_vol': total_trade_vol,
+            'major_diff': (buy_top15 - sell_top15)
+        })
+
+    df_trend = pd.DataFrame(daily_records)
+    if df_trend.empty:
+        return df_trend
+
+    # 依照日期由舊至新排序以便滾動計算
+    df_trend = df_trend.sort_values('trade_date').reset_index(drop=True)
+    
+    # 💡 滾動 5日 / 10日 / 20日 集中度(%) 計算
+    for d in [5, 10, 20]:
+        roll_diff = df_trend['major_diff'].rolling(window=d).sum()
+        roll_vol = df_trend['total_vol'].rolling(window=d).sum()
+        df_trend[f'{d}日集中度(%)'] = ((roll_diff / roll_vol.replace(0, np.nan)) * 100).round(2).fillna(0.0)
+
+    # 填補極少數停牌或無均價的遺漏值
+    df_trend['stock_price'] = df_trend['stock_price'].ffill().bfill()
+    
+    return df_trend
+
+# 🌟 3. 標籤與共用格式函數
 BROKER_TAGS = {"凱基台北": "⚠️隔日沖", "統一城中": "⚠️隔日沖", "元大土城永寧": "⚠️隔日沖", "美林": "🌐外資", "台灣摩根士丹利": "🌐外資"}
 def apply_broker_tags(broker_name):
     name_str = str(broker_name)
@@ -87,7 +153,7 @@ def fmt_int(val):
     if isinstance(val, str): return val
     return "{:,.0f}".format(val) if isinstance(val, (float, int)) and not pd.isna(val) else "-"
 
-# 🌟 3. 個股儀表板 Fragment
+# 🌟 4. 個股儀表板 Fragment
 @st.fragment
 def render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend):
     latest_data = df_trend.iloc[-1]
@@ -98,52 +164,73 @@ def render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend):
     st.subheader(f"📊 {display_name} 籌碼與股價共振走勢")
     
     df_trend_plot = df_trend.copy()
-    
-    # 🛡️ 加入防呆機制：檢查是否真的有股價欄位
-    has_price = 'stock_price' in df_trend_plot.columns
-    if has_price:
-        df_trend_plot = df_trend_plot.dropna(subset=['stock_price'])
-        
     fig_trend = make_subplots(specs=[[{"secondary_y": True}]])
+    
+    # 單日集中度柱狀圖
     colors = ['#FF4B4B' if val > 0 else '#00E272' for val in df_trend_plot['concentration_%']]
     fig_trend.add_trace(go.Bar(x=df_trend_plot['trade_date'], y=df_trend_plot['concentration_%'], marker_color=colors, name='單日集中度', opacity=0.4), secondary_y=True)
     
-    if '5日集中度(%)' in df_trend_plot.columns: fig_trend.add_trace(go.Scatter(x=df_trend_plot['trade_date'], y=df_trend_plot['5日集中度(%)'], mode='lines', line=dict(color='#FFD700', width=2), name='5日集中度'), secondary_y=True)
-    if '10日集中度(%)' in df_trend_plot.columns: fig_trend.add_trace(go.Scatter(x=df_trend_plot['trade_date'], y=df_trend_plot['10日集中度(%)'], mode='lines', line=dict(color='#FF8C00', width=1.5, dash='dot'), name='10日集中度'), secondary_y=True)
-    if '20日集中度(%)' in df_trend_plot.columns: fig_trend.add_trace(go.Scatter(x=df_trend_plot['trade_date'], y=df_trend_plot['20日集中度(%)'], mode='lines', line=dict(color='#FF00FF', width=1.5, dash='dash'), name='20日集中度'), secondary_y=True)
+    # 5/10/20 日滾動集中度線圖
+    if '5日集中度(%)' in df_trend_plot.columns: 
+        fig_trend.add_trace(go.Scatter(x=df_trend_plot['trade_date'], y=df_trend_plot['5日集中度(%)'], mode='lines', line=dict(color='#FFD700', width=2), name='5日集中度'), secondary_y=True)
+    if '10日集中度(%)' in df_trend_plot.columns: 
+        fig_trend.add_trace(go.Scatter(x=df_trend_plot['trade_date'], y=df_trend_plot['10日集中度(%)'], mode='lines', line=dict(color='#FF8C00', width=1.5, dash='dot'), name='10日集中度'), secondary_y=True)
+    if '20日集中度(%)' in df_trend_plot.columns: 
+        fig_trend.add_trace(go.Scatter(x=df_trend_plot['trade_date'], y=df_trend_plot['20日集中度(%)'], mode='lines', line=dict(color='#FF00FF', width=1.5, dash='dash'), name='20日集中度'), secondary_y=True)
     
-    # 🛡️ 只有在有股價資料時才畫出股價線
-    if has_price:
+    # 市場均價線 (淺藍色線)
+    if 'stock_price' in df_trend_plot.columns:
         fig_trend.add_trace(go.Scatter(x=df_trend_plot['trade_date'], y=df_trend_plot['stock_price'], mode='lines+markers', line=dict(color='#38bdf8', width=2), name='市場均價(股價)'), secondary_y=False)
     
+    # 🚩 最大主力防守成本標註 (插旗)
     stock_raw = df_raw_all[df_raw_all['stock_code'] == target_stock].copy()
     broker_col = next((c for c in ['broker_name', 'broker', '券商名稱', '券商', 'name'] if c in stock_raw.columns), None)
     if not stock_raw.empty and broker_col:
         recent_20_dates = sorted(stock_raw['trade_date'].unique(), reverse=True)[:20]
         recent_20_raw = stock_raw[stock_raw['trade_date'].isin(recent_20_dates)]
-        top_broker_agg = recent_20_raw.groupby(broker_col).agg(淨買張數=('net_vol', 'sum'), 總買進金額=('總買進金額', 'sum'), 總買進股數=('總買進股數', 'sum')).sort_values('淨買張數', ascending=False)
-        if not top_broker_agg.empty and top_broker_agg.iloc[0]['淨買張數'] > 0:
+        top_broker_agg = recent_20_raw.groupby(broker_col).agg(
+            淨買張數=('net_vol', 'sum'), 
+            總買進金額=('總買進金額', 'sum'), 
+            總買進股數=('總買進股數', 'sum')
+        ).sort_values('淨買張數', ascending=False)
+        
+        if not top_broker_agg.empty and top_broker_agg.iloc[0]['淨買張數'] > 0 and top_broker_agg.iloc[0]['總買進股數'] > 0:
             top1_name = top_broker_agg.index[0]
             top1_cost = round(top_broker_agg.iloc[0]['總買進金額'] / top_broker_agg.iloc[0]['總買進股數'], 2)
-            fig_trend.add_hline(y=top1_cost, line_color="#FF4B4B", line_width=1.5, line_dash="dash", annotation_text=f"🚩 最大主力 ({top1_name}) 防守成本: {top1_cost}元", annotation_position="bottom right", annotation_font=dict(color="#FF4B4B"), secondary_y=False)
+            fig_trend.add_hline(
+                y=top1_cost, line_color="#FF4B4B", line_width=1.5, line_dash="dash", 
+                annotation_text=f"🚩 最大主力 ({top1_name}) 防守成本: {top1_cost}元", 
+                annotation_position="bottom right", 
+                annotation_font=dict(color="#FF4B4B"), 
+                secondary_y=False
+            )
 
     fig_trend.update_layout(
         height=400, template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(l=20, r=20, t=20, b=20),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         xaxis=dict(type='category', tickmode='array', tickvals=df_trend_plot['trade_date'], ticktext=df_trend_plot['trade_date'].astype(str).str.slice(5, 10), tickangle=45)
     )
-    if has_price:
-        fig_trend.update_yaxes(title_text="**股價 (元)**", secondary_y=False, gridcolor='#334155')
+    fig_trend.update_yaxes(title_text="**股價 (元)**", secondary_y=False, gridcolor='#334155')
     fig_trend.update_yaxes(title_text="**集中度 (%)**", secondary_y=True, showgrid=False)
     st.plotly_chart(fig_trend, use_container_width=True, config={'displayModeBar': False})
     
     with st.expander("📅 展開查看：近 60 日集中度與淨買超歷史表", expanded=False):
-        df_trend_disp = df_trend.sort_values('trade_date', ascending=False).head(60).copy()[['trade_date', 'net_buy', 'concentration_%']]
-        df_trend_disp.columns = ['交易日期', '淨買超(張)', '集中度(%)']
-        st.dataframe(df_trend_disp.style.format({'淨買超(張)': fmt_float, '集中度(%)': "{:.2f}"}), use_container_width=True, hide_index=True)
+        df_trend_disp = df_trend.sort_values('trade_date', ascending=False).head(60).copy()
+        cols_to_show = ['trade_date', 'net_buy', 'concentration_%']
+        if 'stock_price' in df_trend_disp.columns:
+            cols_to_show.append('stock_price')
+            
+        df_trend_disp = df_trend_disp[cols_to_show]
+        rename_dict = {'trade_date': '交易日期', 'net_buy': '淨買超(張)', 'concentration_%': '集中度(%)'}
+        if 'stock_price' in cols_to_show: rename_dict['stock_price'] = '市場均價'
+        
+        df_trend_disp = df_trend_disp.rename(columns=rename_dict)
+        format_dict = {'淨買超(張)': fmt_float, '集中度(%)': "{:.2f}"}
+        if '市場均價' in df_trend_disp.columns: format_dict['市場均價'] = "{:.2f}"
+            
+        st.dataframe(df_trend_disp.style.format(format_dict), use_container_width=True, hide_index=True)
 
     st.markdown("---")
-# ... (下方保持原樣) ...
     st.subheader(f"🔍 {display_name} 券商分點進出明細")
     if broker_col is None: return st.error("⚠️ 無法在資料庫中找到「券商名稱」欄位！")
     available_dates = sorted(stock_raw['trade_date'].dropna().unique(), reverse=True)
@@ -189,7 +276,6 @@ def render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend):
 
     with tab2:
         st.markdown("##### 🕵️‍♂️ 誰在拿真金白銀連續吃貨？")
-        
         intervals = [1, 5, 10, 20, 60]
         cost_dfs = []
         for i in intervals:
@@ -345,16 +431,12 @@ def render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend):
 # 🖼️ 主渲染入口
 # ==========================================
 def render(STOCK_DICT=None):
-    
-    # 🌟 嘗試取得大表中的最新日期，作為基準日
     df_raw_all = load_full_blood_broker_history()
     latest_date = "讀取中..."
     if not df_raw_all.empty and 'trade_date' in df_raw_all.columns:
-        # 💡 安全抓取最新日期，避免受舊版無順序快取的影響
         latest_date = pd.Series(df_raw_all['trade_date'].unique()).dropna().astype(str).max()
 
     st.markdown(f"""券商動向基準日：{latest_date}""", unsafe_allow_html=True)
-
     st.markdown("### 🌍 全市場連買分點快搜")
     scan_tab1, scan_tab2 = st.tabs(["🔹 Top 15主力買超排行", "🔹 單一主力成本分析(豆腐好吃)"])
 
@@ -495,21 +577,18 @@ def render(STOCK_DICT=None):
         display_name = selected_stock_str
         
         if not df_raw_all.empty:
-            # 確保 stock_code 型別為字串以進行比對
             stock_raw = df_raw_all[df_raw_all['stock_code'].astype(str) == target_stock].copy()
             
             if not stock_raw.empty:
                 try: 
-                    # 💡 解答關鍵：同步使用與側邊欄完全一樣的「遠端 URL + 股票代號」來呼叫函式！
-                    # 捨棄傳入瘦身過的 stock_raw，避免計算函式找不到原始欄位
-                    remote_csv_url = "https://raw.githubusercontent.com/goodinfo3583/tw-broker-data/main/data/broker/broker_history.csv"
-                    df_trend = calculate_chip_concentration(remote_csv_url, target_stock)
+                    # 💡 核心亮點：直接利用自身 HF Parquet 資料庫在記憶體秒算！
+                    # 徹底拋棄 yfinance 與 GitHub 死掉的 CSV，日期直接更新到 9/24 最新！
+                    df_trend = calculate_local_chip_concentration(stock_raw)
                     
                     if not df_trend.empty: 
-                        # 這裡的 stock_raw 保留給下方的「券商分點進出明細」表格使用（不影響圖表）
                         render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend)
                     else:
-                        st.warning(f"⚠️ {display_name} 有交易紀錄，但後台算出的集中度資料為空。")
+                        st.warning(f"⚠️ {display_name} 有交易紀錄，但算出的集中度資料為空。")
                 except Exception as e:
                     st.error(f"❌ 在計算集中度時發生程式錯誤：\n\n {e}")
             else: 
