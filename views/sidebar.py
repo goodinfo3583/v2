@@ -281,7 +281,8 @@ def render_sidebar_broker_tracking(query, display_name):
         st.write("⚪ 未進榜 (無近期券商資料)")
         return
         
-    broker_col = next((c for c in ['broker', 'broker_name', '券商名稱', '券商', 'name'] if c in stock_raw.columns), None)
+    # 🛡️ 修正順序：將 broker_name 移到最前面，確保優先顯示中文名稱
+    broker_col = next((c for c in ['broker_name', '券商名稱', 'broker', '券商', 'name'] if c in stock_raw.columns), None)
     if not broker_col: return
 
     available_dates = sorted(stock_raw['trade_date'].unique(), reverse=True)
@@ -289,10 +290,11 @@ def render_sidebar_broker_tracking(query, display_name):
     
     try:
         from utils.data_utils import calculate_chip_concentration
-        
+        # 💡 同步主頁面成功的方法，重新加回 remote_csv_url 保證算出趨勢表
+        remote_csv_url = "https://raw.githubusercontent.com/goodinfo3583/tw-broker-data/main/data/broker/broker_history.csv"
         df_trend = calculate_chip_concentration(remote_csv_url, str(query))
         
-        if not df_trend.empty:
+        if not df_trend.empty and 'concentration_%' in df_trend.columns:
             latest_data = df_trend.iloc[-1]
             m_col1, m_col2 = st.columns(2)
             with m_col1:
@@ -315,7 +317,6 @@ def render_sidebar_broker_tracking(query, display_name):
                     except: pass
                     return 'color: #94A3B8;'
                 
-                # '集中度(%)': "{:.2f}" 讓小數點強制鎖定在第二位
                 if hasattr(df_trend_disp.style, 'map'):
                     styled_trend = df_trend_disp.style.map(color_trend, subset=['淨買超(張)', '集中度(%)']).format({'淨買超(張)': "{:,.0f}", '集中度(%)': "{:.2f}"})
                 else:
@@ -323,47 +324,49 @@ def render_sidebar_broker_tracking(query, display_name):
                 
                 st.dataframe(styled_trend, use_container_width=True, hide_index=True)
             
-            st.markdown("<hr style='border-color: rgba(56, 189, 248, 0.3); margin: 10px 0px;'>", unsafe_allow_html=True)
-    except Exception as e:
-        pass 
+            st.markdown("", unsafe_allow_html=True)
+    except Exception as e:  
 
+        # 💡 將原本的 pass 改成 st.error，若再發生錯誤就不會靜默消失
+        st.error(f"側邊欄集中度模組錯誤: {e}")
+##
     recent_dates = available_dates[:60]
     recent_raw = stock_raw[stock_raw['trade_date'].isin(recent_dates)].copy()
     recent_raw['real_net_vol'] = recent_raw.apply(
         lambda x: abs(x['net_vol']) if x['side'] == 'buy' else -abs(x['net_vol']), axis=1
     )
-    
+
     hoard_df = recent_raw.groupby(broker_col)['real_net_vol'].sum().reset_index()
     hoard_df.columns = [broker_col, '區間淨買賣']
-    
+
     top_5_hoarders = hoard_df[hoard_df['區間淨買賣'] > 0].sort_values('區間淨買賣', ascending=False).head(5)
-    
+
     if top_5_hoarders.empty:
         st.write("⚪ 近 60 日無明顯囤貨分點")
         return
         
     top_5_names = top_5_hoarders[broker_col].tolist()
-    
-    st.markdown("<h6 style='color: #E2E8F0; margin-top: 5px; margin-bottom: 5px;'>📈 近 60 日囤貨分點 (前 5 名)</h6>", unsafe_allow_html=True)
+
+    st.markdown("📈 近 60 日囤貨分點 (前 5 名)", unsafe_allow_html=True)
     styled_hoard = top_5_hoarders.copy()
     styled_hoard.columns = ['中文券商分點', '淨買超(張)']
     styled_hoard = styled_hoard.style.format({'淨買超(張)': "{:,.0f}"})
     st.dataframe(styled_hoard, use_container_width=True, hide_index=True)
-    
-    st.markdown("<h6 style='color: #E2E8F0; margin-top: 10px; margin-bottom: 5px;'>🗺️ 囤貨分點進出矩陣 (近 15 日)</h6>", unsafe_allow_html=True)
-    
+
+    st.markdown("🗺️ 囤貨分點進出矩陣 (近 15 日)", unsafe_allow_html=True)
+
     matrix_raw = stock_raw[stock_raw[broker_col].isin(top_5_names)].copy()
     matrix_raw['signed_vol'] = matrix_raw.apply(
         lambda x: abs(x['net_vol']) if x['side'] == 'buy' else -abs(x['net_vol']), axis=1
     )
-    
+
     full_pivot = matrix_raw.pivot_table(index=broker_col, columns='trade_date', values='signed_vol', aggfunc='sum')
     all_dates_sorted = sorted(full_pivot.columns, reverse=True)
-    
+
     display_dates = available_dates[:15]
     display_dates = [d for d in display_dates if d in full_pivot.columns]
     pivot_df = full_pivot[display_dates].copy()
-    
+
     def calc_daily_streak(row_name):
         if row_name not in full_pivot.index: return "-"
         row = full_pivot.loc[row_name]
@@ -388,10 +391,10 @@ def render_sidebar_broker_tracking(query, display_name):
     pivot_df = pivot_df.reindex(top_5_names) 
     pivot_df[display_dates] = pivot_df[display_dates].fillna("-")
     pivot_df.index.name = "中文券商分點"
-    
+
     cols = ['日連買動態'] + display_dates
     pivot_df = pivot_df[cols]
-    
+
     def color_net_vol(val):
         if isinstance(val, str):
             if val == "-": return 'color: #64748B;'
@@ -408,9 +411,8 @@ def render_sidebar_broker_tracking(query, display_name):
         styled_pivot = pivot_df.style.map(color_net_vol).format(lambda x: "{:,.0f}".format(x) if isinstance(x, (int, float)) else x)
     else:
         styled_pivot = pivot_df.style.applymap(color_net_vol).format(lambda x: "{:,.0f}".format(x) if isinstance(x, (int, float)) else x)
-    
-    st.dataframe(styled_pivot, use_container_width=True)
 
+    st.dataframe(styled_pivot, use_container_width=True)
 # ==========================================
 # 📈 側邊雙視窗 K 線圖與技術分析引擎
 # ==========================================
