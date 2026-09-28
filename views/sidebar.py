@@ -1276,7 +1276,6 @@ def render_sidebar_war_room(STOCK_DICT, DATA_DIR="data"):
             # b1
 
             st.markdown("<hr style='border-color: #334155;'>", unsafe_allow_html=True)
-            
             icon_b1 = get_img_html("magicbookleaf.png") 
             st.markdown(f"<h4 style='color: #FCD34D;'>{icon_b1}法人動向</h4>", unsafe_allow_html=True)
             
@@ -1535,23 +1534,26 @@ def render_sidebar_war_room(STOCK_DICT, DATA_DIR="data"):
                 # --- A. 集中度動能投射 (從 momentum_latest.parquet 抓取) ---
                 st.markdown("🎯 集中度動能狀態", unsafe_allow_html=True)
                 if not df_momentum.empty:
-                mom_res = df_momentum[df_momentum['股票代號'].astype(str) == stock_id_str]
-                if not mom_res.empty:
-                row_m = mom_res.iloc[0]
-                c1, c2, c3 = st.columns(3)
-                with c1: st.metric("單日Δ", f"{row_m.get('1d_conc', 0):.2f}%", f"{row_m.get('單日Δ', 0):+.2f}")
-                with c2: st.metric("5日Δ", f"{row_m.get('5d_conc', 0):.2f}%", f"{row_m.get('5日Δ', 0):+.2f}")
-                with c3: st.metric("10日Δ", f"{row_m.get('10d_conc', 0):.2f}%", f"{row_m.get('10日Δ', 0):+.2f}")
+                    # 👉 修正縮排：這裡開始的程式碼向右移 4 格
+                    mom_res = df_momentum[df_momentum['股票代號'].astype(str) == stock_id_str]
+                    if not mom_res.empty:
+                        # 👉 修正縮排：這裡開始的程式碼再向右移 4 格
+                        row_m = mom_res.iloc[0]
+                        c1, c2, c3 = st.columns(3)
+                        with c1: st.metric("單日Δ", f"{row_m.get('1d_conc', 0):.2f}%", f"{row_m.get('單日Δ', 0):+.2f}")
+                        with c2: st.metric("5日Δ", f"{row_m.get('5d_conc', 0):.2f}%", f"{row_m.get('5日Δ', 0):+.2f}")
+                        with c3: st.metric("10日Δ", f"{row_m.get('10d_conc', 0):.2f}%", f"{row_m.get('10日Δ', 0):+.2f}")
 
-                st.markdown(f"💡 最新動態：{row_m.get('最新動態', '-')} | 上榜期程：{row_m.get('今日上榜期程', '-')}", unsafe_allow_html=True)
-                else:
-                st.write("⚪ 動能排行榜未進榜")
+                        st.markdown(f"💡 最新動態：{row_m.get('最新動態', '-')} | 上榜期程：{row_m.get('今日上榜期程', '-')}", unsafe_allow_html=True)
+                    else:
+                        st.write("⚪ 動能排行榜未進榜")
 
                 # --- B. 全市場排行與成本分析投射 ---
                 st.markdown("🏆 買超排行與主力成本", unsafe_allow_html=True)
 
                 # Top 15 排行
                 if not df_top15.empty:
+                    # 👉 修正縮排
                     t15_res = df_top15[df_top15['股票代號'].astype(str) == stock_id_str]
                     if not t15_res.empty:
                         r_t15 = t15_res.iloc[0]
@@ -1559,6 +1561,7 @@ def render_sidebar_war_room(STOCK_DICT, DATA_DIR="data"):
 
                 # 豆腐分析
                 if not df_tofu.empty:
+                    # 👉 修正縮排
                     tofu_res = df_tofu[df_tofu['股票代號'].astype(str) == stock_id_str]
                     if not tofu_res.empty:
                         r_tofu = tofu_res.iloc[0]
