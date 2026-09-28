@@ -269,17 +269,17 @@ def render_b4_panorama(view_title, keys_and_labels, query, stock_name="-"):
                 st.markdown(f"<div style='font-size:13px; color:#94a3b8; margin-top:4px; margin-bottom:4px;'>{label}： <span style='color:#E2E8F0;'>⚪ 未進榜</span></div>", unsafe_allow_html=True)
         else:
             st.markdown(f"<div style='font-size:13px; color:#94a3b8; margin-top:4px; margin-bottom:4px;'>{label}： <span style='color:#f59e0b;'>⚠️ 尚未載入</span></div>", unsafe_allow_html=True)
-
-def render_sidebar_broker_tracking(query, display_name):
-    df_raw = get_sidebar_df('broker_history')
-    if df_raw.empty:
-        st.write("⚪ 尚未載入券商資料")
-        return
+#
+def render_sidebar_broker_tracking(query, display_name, stock_raw, df_trend):
+    #df_raw = get_sidebar_df('broker_history')
+    #if df_raw.empty:
+    #    st.write("⚪ 尚未載入券商資料")
+    #    return
         
-    stock_raw = df_raw[df_raw['stock_code'] == str(query)].copy()
-    if stock_raw.empty:
-        st.write("⚪ 未進榜 (無近期券商資料)")
-        return
+    #stock_raw = df_raw[df_raw['stock_code'] == str(query)].copy()
+    #if stock_raw.empty:
+    #    st.write("⚪ 未進榜 (無近期券商資料)")
+    #    return
         
     # 🛡️ 修正順序：將 broker_name 移到最前面，確保優先顯示中文名稱
     broker_col = next((c for c in ['broker_name', '券商名稱', 'broker', '券商', 'name'] if c in stock_raw.columns), None)
@@ -287,50 +287,106 @@ def render_sidebar_broker_tracking(query, display_name):
 
     available_dates = sorted(stock_raw['trade_date'].unique(), reverse=True)
     if not available_dates: return
-    
-    try:
-        # 💡 解答關鍵：直接從 broker_page 借用「已經算好且快取好」的趨勢大表
-        # 徹底拋棄舊的 utils.calculate_chip_concentration 與 GitHub 網址！
-        from views.broker_page import load_stock_trends
-        df_trends_all = load_stock_trends()
+
+    # 1. 顯示最新一筆集中度指標
+    if not df_trend.empty and 'concentration_%' in df_trend.columns:
+        latest_data = df_trend.iloc[-1]
+        m_col1, m_col2 = st.columns(2)
+        with m_col1:
+            st.metric(label=f"最新集中度 ({latest_data['trade_date']})", value=f"{latest_data['concentration_%']}%")
+        with m_col2:
+            net_buy_val = latest_data['net_buy']
+            net_str = f"+{net_buy_val:,}" if net_buy_val > 0 else f"{net_buy_val:,}"
+            st.metric(label="主體淨買賣超", value=f"{net_str} 張")
+
+    # 2. 計算並顯示近 60 日囤貨前 5 名
+    recent_dates = available_dates[:60]
+    recent_raw = stock_raw[stock_raw['trade_date'].isin(recent_dates)].copy()
+    recent_raw['real_net_vol'] = recent_raw.apply(
+        lambda x: abs(x['net_vol']) if x['side'] == 'buy' else -abs(x['net_vol']), axis=1
+    )
+
+    hoard_df = recent_raw.groupby(broker_col)['real_net_vol'].sum().reset_index()
+    hoard_df.columns = [broker_col, '區間淨買賣']
+
+    top_5_hoarders = hoard_df[hoard_df['區間淨買賣'] > 0].sort_values('區間淨買賣', ascending=False).head(5)
+
+    if top_5_hoarders.empty:
+        st.write("⚪ 近 60 日無明顯囤貨分點")
+        return
         
-        if not df_trends_all.empty:
-            # 取出該檔股票的趨勢資料
-            df_trend = df_trends_all[df_trends_all['stock_code'].astype(str) == str(query)].copy()
-            
-            if not df_trend.empty and 'concentration_%' in df_trend.columns:
-                latest_data = df_trend.iloc[-1]
-                m_col1, m_col2 = st.columns(2)
-                with m_col1:
-                    st.metric(label=f"最新集中度 ({latest_data['trade_date']})", value=f"{latest_data['concentration_%']}%")
-                with m_col2:
-                    net_buy_val = latest_data['net_buy']
-                    net_str = f"+{net_buy_val:,}" if net_buy_val > 0 else f"{net_buy_val:,}"
-                    st.metric(label="主體淨買賣超", value=f"{net_str} 張")
-                
-                with st.expander("📅 展開查看：近 60 日集中度與淨買超", expanded=False):
-                    df_trend_disp = df_trend.sort_values('trade_date', ascending=False).head(60).copy()
-                    df_trend_disp = df_trend_disp[['trade_date', 'net_buy', 'concentration_%']]
-                    df_trend_disp.columns = ['交易日期', '淨買超(張)', '集中度(%)']
-                    
-                    def color_trend(val):
-                        try:
-                            v = float(val)
-                            if v > 0: return 'color: #FF4B4B;'
-                            elif v < 0: return 'color: #00E272;'
-                        except: pass
-                        return 'color: #94A3B8;'
-                    
-                    if hasattr(df_trend_disp.style, 'map'):
-                        styled_trend = df_trend_disp.style.map(color_trend, subset=['淨買超(張)', '集中度(%)']).format({'淨買超(張)': "{:,.0f}", '集中度(%)': "{:.2f}"})
-                    else:
-                        styled_trend = df_trend_disp.style.applymap(color_trend, subset=['淨買超(張)', '集中度(%)']).format({'淨買超(張)': "{:,.0f}", '集中度(%)': "{:.2f}"})                    
-                    st.dataframe(styled_trend, use_container_width=True, hide_index=True)
-                st.markdown("", unsafe_allow_html=True)
-        else:
-            st.write("⚪ 尚無近期集中度資料")
-    except Exception as e:
-        st.error(f"側邊欄集中度模組錯誤: {e}")
+    top_5_names = top_5_hoarders[broker_col].tolist()
+
+    st.markdown("📈 近 60 日囤貨分點 (前 5 名)", unsafe_allow_html=True)
+    styled_hoard = top_5_hoarders.copy()
+    styled_hoard.columns = ['分點名稱', '淨買超(張)']
+    st.dataframe(styled_hoard.style.format({'淨買超(張)': "{:,.0f}"}), use_container_width=True, hide_index=True)
+    # 3. 產生囤貨分點進出矩陣 (近 10 日，適合側邊欄寬度)
+    st.markdown("🗺 囤貨分點進出矩陣 (近 10 日)", unsafe_allow_html=True)
+    matrix_raw = stock_raw[stock_raw[broker_col].isin(top_5_names)].copy()
+    matrix_raw['signed_vol'] = matrix_raw.apply(
+        lambda x: abs(x['net_vol']) if x['side'] == 'buy' else -abs(x['net_vol']), axis=1
+    )
+
+    full_pivot = matrix_raw.pivot_table(index=broker_col, columns='trade_date', values='signed_vol', aggfunc='sum')
+    all_dates_sorted = sorted(full_pivot.columns, reverse=True)
+
+    display_dates = available_dates[:10]  # 側邊欄窄，取 10 天較為適合
+    display_dates = [d for d in display_dates if d in full_pivot.columns]
+    pivot_df = full_pivot[display_dates].copy()
+
+    def calc_daily_streak(row_name):
+        if row_name not in full_pivot.index: return "-"
+        row = full_pivot.loc[row_name]
+        streak = 0
+        sign = None
+        for c in all_dates_sorted:
+            val = row.get(c, 0)
+            if pd.isna(val) or val == 0: break
+            current_sign = 1 if val > 0 else -1
+            if sign is None:
+                sign = current_sign
+                streak = sign
+            elif sign == current_sign:
+                streak += sign
+            else:
+                break
+        if streak > 0: return f"連買 {streak}"
+        elif streak < 0: return f"連賣 {-streak}"
+        else: return "-"
+
+    pivot_df['連買動態'] = pivot_df.index.to_series().apply(calc_daily_streak)
+    pivot_df = pivot_df.reindex(top_5_names) 
+    pivot_df[display_dates] = pivot_df[display_dates].fillna("-")
+    pivot_df.index.name = "分點"
+
+    # 簡化日期標頭 (MM-DD) 以節省側邊欄空間
+    short_dates = [d[5:] for d in display_dates]
+    rename_dict = dict(zip(display_dates, short_dates))
+    pivot_df.rename(columns=rename_dict, inplace=True)
+    cols = ['連買動態'] + short_dates
+    pivot_df = pivot_df[cols]
+
+    def color_net_vol(val):
+        if isinstance(val, str):
+            if val == "-": return 'color: #64748B;'
+            if "買" in val: return 'color: #FF4B4B;'
+            if "賣" in val: return 'color: #00E272;'
+        try:
+            v = float(val)
+            if v > 0: return 'color: #FF4B4B;'
+            elif v < 0: return 'color: #00E272;'
+        except: pass
+        return 'color: #94A3B8;'
+
+    if hasattr(pivot_df.style, 'map'):
+        styled_pivot = pivot_df.style.map(color_net_vol).format(lambda x: "{:,.0f}".format(x) if isinstance(x, (int, float)) else x)
+    else:
+        styled_pivot = pivot_df.style.applymap(color_net_vol).format(lambda x: "{:,.0f}".format(x) if isinstance(x, (int, float)) else x)
+
+    st.dataframe(styled_pivot, use_container_width=True)
+    #
+
 ##
     recent_dates = available_dates[:60]
     recent_raw = stock_raw[stock_raw['trade_date'].isin(recent_dates)].copy()
@@ -1452,11 +1508,89 @@ def render_sidebar_war_room(STOCK_DICT, DATA_DIR="data"):
             scan_and_display("🔹 董監持股比增減", 'b7_main', target_query)
 
             # 👇 新增：區塊 8 券商分點追蹤 
-            st.markdown("<hr style='border-color: #334155;'>", unsafe_allow_html=True)
-            icon_broker = get_img_html("icon-building.png") 
-            st.markdown(f"<h4 style='color: #FCD34D;'>{icon_broker}分點追蹤</h4>", unsafe_allow_html=True)
-            render_sidebar_broker_tracking(target_query, display_name)
-            
+            #st.markdown("<hr style='border-color: #334155;'>", unsafe_allow_html=True)
+            #icon_broker = get_img_html("icon-building.png") 
+            #st.markdown(f"<h4 style='color: #FCD34D;'>{icon_broker}券商主力</h4>", unsafe_allow_html=True)
+            #render_sidebar_broker_tracking(target_query, display_name)
+ #
+            # ==============================================================
+            # 👇 全新區塊 8：券商分點進階雷達 (投射自 broker_page 的核心數據)
+            # ==============================================================
+            st.markdown("", unsafe_allow_html=True)
+            icon_broker = get_img_html("icon-building.png")
+            st.markdown(f"{icon_broker}券商主力進階雷達", unsafe_allow_html=True)
+            try:
+                # 1. 載入所需的核心資料表 (已快取，不佔額外記憶體)
+                from views.broker_page import fetch_parquet_from_hf, load_stock_trends, load_full_blood_broker_history
+                
+                df_top15 = fetch_parquet_from_hf("scan__依主力Top15買超張數排行_復刻三竹.parquet")
+                df_tofu = fetch_parquet_from_hf("scan_依股價乖離率吃豆腐排行.parquet")
+                df_multi = fetch_parquet_from_hf("scan_多期程主力買超統計.parquet")
+                df_momentum = fetch_parquet_from_hf("momentum_latest.parquet")
+                df_trends_all = load_stock_trends()
+                df_raw_all = load_full_blood_broker_history()
+
+                stock_id_str = str(pure_stock_id)
+
+                # --- A. 集中度動能投射 (從 momentum_latest.parquet 抓取) ---
+                st.markdown("🎯 集中度動能狀態", unsafe_allow_html=True)
+                if not df_momentum.empty:
+                mom_res = df_momentum[df_momentum['股票代號'].astype(str) == stock_id_str]
+                if not mom_res.empty:
+                row_m = mom_res.iloc[0]
+                c1, c2, c3 = st.columns(3)
+                with c1: st.metric("單日Δ", f"{row_m.get('1d_conc', 0):.2f}%", f"{row_m.get('單日Δ', 0):+.2f}")
+                with c2: st.metric("5日Δ", f"{row_m.get('5d_conc', 0):.2f}%", f"{row_m.get('5日Δ', 0):+.2f}")
+                with c3: st.metric("10日Δ", f"{row_m.get('10d_conc', 0):.2f}%", f"{row_m.get('10日Δ', 0):+.2f}")
+
+                st.markdown(f"💡 最新動態：{row_m.get('最新動態', '-')} | 上榜期程：{row_m.get('今日上榜期程', '-')}", unsafe_allow_html=True)
+                else:
+                st.write("⚪ 動能排行榜未進榜")
+
+                # --- B. 全市場排行與成本分析投射 ---
+                st.markdown("🏆 買超排行與主力成本", unsafe_allow_html=True)
+
+                # Top 15 排行
+                if not df_top15.empty:
+                    t15_res = df_top15[df_top15['股票代號'].astype(str) == stock_id_str]
+                    if not t15_res.empty:
+                        r_t15 = t15_res.iloc[0]
+                        st.markdown(f"**Top15主力：**全市場排名第 {r_t15.get('市場排名', '-')} 名，今日買超 {r_t15.get('最新日買超張數', 0):,.0f} 張，均價 {r_t15.get('最新均價', '-')}" , unsafe_allow_html=True)
+
+                # 豆腐分析
+                if not df_tofu.empty:
+                    tofu_res = df_tofu[df_tofu['股票代號'].astype(str) == stock_id_str]
+                    if not tofu_res.empty:
+                        r_tofu = tofu_res.iloc[0]
+                        dev_val = r_tofu.get('乖離率(%)', 0)
+                        dev_color = "#FF4B4B" if dev_val > 0 else "#00E272"
+                        st.markdown(f"**豆腐分析：**最大主力 {r_tofu.get('最大主力分點', '-')}，成本 {r_tofu.get('主力成本', '-')}。現價乖離 {dev_val}% ({r_tofu.get('吃豆腐動態', '-')})", unsafe_allow_html=True)
+
+                # --- C. 多期程買超投射 ---
+                if not df_multi.empty:
+                    multi_res = df_multi[df_multi['股票代號'].astype(str) == stock_id_str]
+                    if not multi_res.empty:
+                        with st.expander("⏱️ 展開查看：多期程主力淨買超", expanded=False):
+                            disp_multi = multi_res[['統計期程', '市場排名', '期程買超張數', '期程均價']].copy()
+                            st.dataframe(disp_multi.style.format({'期程買超張數': "{:,.0f}", '期程均價': "{:.2f}"}), use_container_width=True, hide_index=True)
+
+                # --- D. 個股歷史趨勢與囤貨矩陣投射 ---
+                if not df_trends_all.empty and not df_raw_all.empty:
+                    stock_raw = df_raw_all[df_raw_all['stock_code'].astype(str) == stock_id_str].copy()
+                    df_trend = df_trends_all[df_trends_all['stock_code'].astype(str) == stock_id_str].copy()
+                    
+                    if not stock_raw.empty and not df_trend.empty:
+                        # 借用舊有的渲染邏輯，顯示側邊欄專屬明細
+                        st.markdown("🗺️ 分點囤貨與進出軌跡", unsafe_allow_html=True)
+                        render_sidebar_broker_tracking(stock_id_str, display_name, stock_raw, df_trend)
+                    else:
+                        st.write("⚪ 無詳細分點交易紀錄")
+                else:
+                    st.write("⚪ 資料載入中...")
+
+            except Exception as e:
+                st.error(f"側邊欄券商雷達載入錯誤: {e}")
+ #
     # ==========================================            
     # 💡 當搜尋列「沒有內容」時，顯示大盤總經
     if not search_query:
