@@ -246,22 +246,29 @@ def render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend):
             區間淨買賣金額=('買賣超金額', 'sum')
         ).reset_index()
         hoard_df['斥資(億)'] = (hoard_df['區間淨買賣金額'] / 100000000).round(2)
-        hoard_df[broker_col] = hoard_df[broker_col].apply(apply_broker_tags)
         
+        # 💡 修正1：先把所有不同期程的均價合併進來，再來貼外資與隔日沖標籤！
         for cdf in cost_dfs:
             hoard_df = pd.merge(hoard_df, cdf, on=broker_col, how='left')
+            
+        hoard_df[broker_col] = hoard_df[broker_col].apply(apply_broker_tags)
+
+        # 💡 修正2：建立格式化小工具，把沒有交易的 0 或 NaN 優雅地轉成 '-'
+        def format_price(x):
+            return "-" if pd.isna(x) or x == 0 else f"{x:.2f}"
 
         col_hoard, col_dump = st.columns(2)
         with col_hoard:
             st.markdown("##### 📈 近 60 日囤貨分點 (斥資破億榜)")
             hoarders = hoard_df[hoard_df['區間淨買超張數'] > 0].sort_values('斥資(億)', ascending=False).copy()
             if not hoarders.empty:
-                hoarders = hoarders.rename(columns={'區間淨買超張數': '淨買超(張)'})
+                # 💡 修正3：將 broker_col 強制重新命名為中文的 '券商名稱'
+                hoarders = hoarders.rename(columns={'區間淨買超張數': '淨買超(張)', broker_col: '券商名稱'})
                 buy_cols = [c for c in [f'{i}日均買' for i in intervals] if c in hoarders.columns]
-                display_cols = [broker_col, '淨買超(張)'] + buy_cols + ['斥資(億)']
+                display_cols = ['券商名稱', '淨買超(張)'] + buy_cols + ['斥資(億)']
                 
                 format_dict = {'淨買超(張)': fmt_float, '斥資(億)': "{:.2f}"}
-                for bc in buy_cols: format_dict[bc] = "{:.2f}"
+                for bc in buy_cols: format_dict[bc] = format_price # 套用新的格式化工具
                 
                 styled_hoard = hoarders[display_cols].style.format(format_dict)
                 try: styled_hoard = styled_hoard.background_gradient(subset=['斥資(億)'], cmap='Reds')
@@ -275,13 +282,14 @@ def render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend):
             if not dumpers.empty:
                 dumpers['斥資(億)'] = dumpers['斥資(億)'].abs()
                 dumpers['區間淨買超張數'] = dumpers['區間淨買超張數'].abs()
-                dumpers = dumpers.rename(columns={'區間淨買超張數': '淨賣超(張)', '斥資(億)': '提款(億)'})
+                # 💡 同樣修正中文欄位名稱
+                dumpers = dumpers.rename(columns={'區間淨買超張數': '淨賣超(張)', '斥資(億)': '提款(億)', broker_col: '券商名稱'})
                 
                 sell_cols = [c for c in [f'{i}日均賣' for i in intervals] if c in dumpers.columns]
-                display_cols = [broker_col, '淨賣超(張)'] + sell_cols + ['提款(億)']
+                display_cols = ['券商名稱', '淨賣超(張)'] + sell_cols + ['提款(億)']
                 
                 format_dict = {'淨賣超(張)': fmt_float, '提款(億)': "{:.2f}"}
-                for sc in sell_cols: format_dict[sc] = "{:.2f}"
+                for sc in sell_cols: format_dict[sc] = format_price # 套用新的格式化工具
                 
                 styled_dump = dumpers[display_cols].style.format(format_dict)
                 try: styled_dump = styled_dump.background_gradient(subset=['提款(億)'], cmap='Greens')
