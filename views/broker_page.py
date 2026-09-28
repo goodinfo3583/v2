@@ -206,7 +206,7 @@ def render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend):
             if '買賣超金額' in df.columns:
                 df['金額(萬)'] = (df['買賣超金額'] / 10000).round(0)
                 df = df[[broker_col, 'net_vol', '均價', '金額(萬)']]
-                df.columns = ['券商名稱', '張數', '均價', '金額(萬)']
+                df.columns = ['券商', '張數', '均價', '金額(萬)']
                 return df.style.format({'張數': fmt_float, '均價': "{:.2f}", '金額(萬)': fmt_int})
             else:
                 df = df[[broker_col, 'net_vol', '均價']]
@@ -342,7 +342,7 @@ def render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend):
             pivot_df['週連買動態'] = pivot_df.index.to_series().apply(calc_weekly_streak)
             pivot_df[display_dates] = pivot_df[display_dates].fillna("-")
             pivot_df.index = pivot_df.index.to_series().apply(apply_broker_tags)
-            pivot_df.index.name = "券商分點"
+            pivot_df.index.name = "券商"
             
             cols = ['日連買動態', '週連買動態', '區間累計'] + display_dates
             pivot_df = pivot_df[cols]
