@@ -443,24 +443,21 @@ def render(STOCK_DICT=None):
             period_sel = st.selectbox("選擇統計期程", df_multi['統計期程'].unique(), key="multi_period_sel")
             df_multi_disp = df_multi[df_multi['統計期程'] == period_sel].copy()
             
-            # 💡 新增 B：「排名」與「△市場排名」邏輯
-            if '期程買超張數' in df_multi_disp.columns:
-                # 即時計算當前排名 (依據買超張數)
-                df_multi_disp['當前排名'] = df_multi_disp['期程買超張數'].rank(ascending=False, method='min').astype(int)
-                
-                # 檢查後端是否有傳入「昨日排名」或「△市場排名」，若無則給予提示
-                if '昨日排名' in df_multi_disp.columns:
-                    df_multi_disp['△市場排名'] = df_multi_disp['昨日排名'] - df_multi_disp['當前排名']
-                elif '△市場排名' not in df_multi_disp.columns:
-                    df_multi_disp['△市場排名'] = "- (需後端)"
+            # 💡 修正 B：移除前端計算排名，並將「△市場排名」緊接在「市場排名」之後
+            # 檢查後端是否有傳入「昨日排名」以計算差值，若無則給予提示
+            if '昨日排名' in df_multi_disp.columns and '市場排名' in df_multi_disp.columns:
+                df_multi_disp['△市場排名'] = df_multi_disp['昨日排名'] - df_multi_disp['市場排名']
+            elif '△市場排名' not in df_multi_disp.columns:
+                df_multi_disp['△市場排名'] = "- (需後端)"
 
-                # 將排名欄位移到股票名稱後面
-                disp_cols = df_multi_disp.columns.tolist()
-                for c in ['當前排名', '△市場排名']:
-                    if c in disp_cols:
-                        disp_cols.remove(c)
-                        disp_cols.insert(disp_cols.index('股票名稱')+1, c)
-                df_multi_disp = df_multi_disp[disp_cols]
+            # 將「△市場排名」移到「市場排名」後面
+            disp_cols = df_multi_disp.columns.tolist()
+            if '△市場排名' in disp_cols and '市場排名' in disp_cols:
+                disp_cols.remove('△市場排名')
+                # 找到「市場排名」的索引位置，並加 1 插入在其後方
+                insert_idx = disp_cols.index('市場排名') + 1 
+                disp_cols.insert(insert_idx, '△市場排名')
+            df_multi_disp = df_multi_disp[disp_cols]
 
             if '期程買超張數' in df_multi_disp.columns and '期程均價' in df_multi_disp.columns:
                 df_multi_disp['斥資(億)'] = (df_multi_disp['期程買超張數'] * df_multi_disp['期程均價'] * 1000 / 100000000).round(2)
