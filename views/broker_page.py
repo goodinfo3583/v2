@@ -398,7 +398,7 @@ def render(STOCK_DICT=None):
         latest_date = pd.Series(df_raw_all['trade_date'].unique()).dropna().astype(str).max()
 
     st.markdown(f"""券商動向基準日：{latest_date}""", unsafe_allow_html=True)
-st.markdown("### 🌍 全市場連買分點快搜")
+    st.markdown("### 🌍 全市場連買分點快搜")
     
     # 這裡只宣告兩個 tab 變數：scan_tab1 (豆腐), scan_tab2 (多期程)
     scan_tab1, scan_tab2 = st.tabs(["🔹 單一主力成本分析(豆腐好吃)", "🔹 多期程主力買超"])
