@@ -400,11 +400,80 @@ def render(STOCK_DICT=None):
     st.markdown(f"""券商動向基準日：{latest_date}""", unsafe_allow_html=True)
     st.markdown("### 🌍 全市場連買分點快搜")
     
-    # 這裡只宣告兩個 tab 變數：scan_tab1 (豆腐), scan_tab2 (多期程)
-    scan_tab1, scan_tab2 = st.tabs(["🔹 單一主力成本分析(豆腐好吃)", "🔹 多期程主力買超"])
+    # 💡 修正 1：對調 Tab 順序，將「多期程」放在「豆腐」前面
+    scan_tab1, scan_tab2 = st.tabs(["🔹 多期程主力買超", "🔹 單一主力成本分析(豆腐好吃)"])
 
-    # === 原本的 scan_tab2 變成 scan_tab1 ===
+    # ==========================================
+    # 🔹 多期程主力買超 (移至 scan_tab1)
+    # ==========================================
     with scan_tab1:
+        df_multi = fetch_parquet_from_hf("scan_多期程主力買超統計.parquet")
+        if not df_multi.empty:
+            if STOCK_DICT and '股票代號' in df_multi.columns:
+                df_multi['股票名稱'] = df_multi['股票代號'].astype(str).apply(lambda x: STOCK_DICT.get(x, {}).get('name', '-'))
+            
+            # 💡 新增 A：「今日上榜期程」彙整邏輯 (超低記憶體消耗)
+            if '統計期程' in df_multi.columns:
+                # 定義排序，確保顯示順序永遠是 1日 -> 5日 -> 20日
+                period_order = {"1日": 1, "5日": 2, "20日": 3}
+                def get_sorted_periods(periods):
+                    return ", ".join(sorted(list(periods), key=lambda x: period_order.get(x, 99)))
+                
+                # 將同一檔股票出現的期程合併成字串
+                period_map = df_multi.groupby('股票代號')['統計期程'].apply(get_sorted_periods).to_dict()
+                df_multi['今日上榜期程'] = df_multi['股票代號'].astype(str).map(period_map)
+
+            # 背景讀取 Top 15 檔案提取「主力連買動態」
+            df_top15_for_map = fetch_parquet_from_hf("scan__依主力Top15買超張數排行_復刻三竹.parquet")
+            if not df_top15_for_map.empty and '股票代號' in df_top15_for_map.columns and '主力連買動態' in df_top15_for_map.columns:
+                streak_map = dict(zip(df_top15_for_map['股票代號'].astype(str), df_top15_for_map['主力連買動態']))
+                df_multi['主力連買動態'] = df_multi['股票代號'].astype(str).map(streak_map).fillna("-")
+            
+            # 整理欄位順序 (將新增的欄位排到前面)
+            cols = df_multi.columns.tolist()
+            for c in ['股票名稱', '主力連買動態', '今日上榜期程']:
+                if c in cols: cols.remove(c)
+            insert_idx = cols.index('股票代號') + 1
+            cols.insert(insert_idx, '股票名稱')
+            if '今日上榜期程' in df_multi.columns: cols.insert(insert_idx+1, '今日上榜期程')
+            if '主力連買動態' in df_multi.columns: cols.insert(insert_idx+2, '主力連買動態')
+            df_multi = df_multi[cols]
+
+            # 建立選單與篩選
+            period_sel = st.selectbox("選擇統計期程", df_multi['統計期程'].unique(), key="multi_period_sel")
+            df_multi_disp = df_multi[df_multi['統計期程'] == period_sel].copy()
+            
+            # 💡 新增 B：「排名」與「△市場排名」邏輯
+            if '期程買超張數' in df_multi_disp.columns:
+                # 即時計算當前排名 (依據買超張數)
+                df_multi_disp['當前排名'] = df_multi_disp['期程買超張數'].rank(ascending=False, method='min').astype(int)
+                
+                # 檢查後端是否有傳入「昨日排名」或「△市場排名」，若無則給予提示
+                if '昨日排名' in df_multi_disp.columns:
+                    df_multi_disp['△市場排名'] = df_multi_disp['昨日排名'] - df_multi_disp['當前排名']
+                elif '△市場排名' not in df_multi_disp.columns:
+                    df_multi_disp['△市場排名'] = "- (需後端)"
+
+                # 將排名欄位移到股票名稱後面
+                disp_cols = df_multi_disp.columns.tolist()
+                for c in ['當前排名', '△市場排名']:
+                    if c in disp_cols:
+                        disp_cols.remove(c)
+                        disp_cols.insert(disp_cols.index('股票名稱')+1, c)
+                df_multi_disp = df_multi_disp[disp_cols]
+
+            if '期程買超張數' in df_multi_disp.columns and '期程均價' in df_multi_disp.columns:
+                df_multi_disp['斥資(億)'] = (df_multi_disp['期程買超張數'] * df_multi_disp['期程均價'] * 1000 / 100000000).round(2)
+                
+            format_dict = {'期程買超張數': "{:,.0f}", '期程均價': "{:.2f}", '斥資(億)': "{:.2f}"}
+            st.dataframe(df_multi_disp.style.format(format_dict).background_gradient(subset=['斥資(億)'], cmap='Reds'), use_container_width=True, hide_index=True)
+        else:
+            st.info("資料載入中或後台尚未產出今日資料。")
+
+    # ==========================================
+    # 🔹 單一主力成本分析(豆腐好吃) (移至 scan_tab2)
+    # ==========================================
+    with scan_tab2:
         df_tofu = fetch_parquet_from_hf("scan_依股價乖離率吃豆腐排行.parquet")
         if not df_tofu.empty:
             if STOCK_DICT and '股票代號' in df_tofu.columns:
@@ -419,39 +488,6 @@ def render(STOCK_DICT=None):
             
             format_dict = {'主力成本': "{:.2f}", '最新股價': "{:.2f}", '乖離率(%)': "{:.2f}", '主力囤貨(張)': "{:,.1f}", '斥資(萬)': "{:,.0f}"}
             st.dataframe(df_tofu.style.format(format_dict).background_gradient(subset=['乖離率(%)'], cmap='coolwarm_r'), use_container_width=True, hide_index=True)
-        else:
-            st.info("資料載入中或後台尚未產出今日資料。")
-            
-    # === 原本的 scan_tab3 變成 scan_tab2 ===
-    with scan_tab2:
-        df_multi = fetch_parquet_from_hf("scan_多期程主力買超統計.parquet")
-        if not df_multi.empty:
-            if STOCK_DICT and '股票代號' in df_multi.columns:
-                df_multi['股票名稱'] = df_multi['股票代號'].astype(str).apply(lambda x: STOCK_DICT.get(x, {}).get('name', '-'))
-                cols = df_multi.columns.tolist()
-                if '股票名稱' in cols:
-                    cols.insert(cols.index('股票代號')+1, cols.pop(cols.index('股票名稱')))
-                    df_multi = df_multi[cols]
-            
-            # 背景讀取 Top 15 檔案，僅用來提取「主力連買動態」
-            df_top15_for_map = fetch_parquet_from_hf("scan__依主力Top15買超張數排行_復刻三竹.parquet")
-            if not df_top15_for_map.empty and '股票代號' in df_top15_for_map.columns and '主力連買動態' in df_top15_for_map.columns:
-                streak_map = dict(zip(df_top15_for_map['股票代號'].astype(str), df_top15_for_map['主力連買動態']))
-                df_multi['主力連買動態'] = df_multi['股票代號'].astype(str).map(streak_map).fillna("-")
-                
-                cols = df_multi.columns.tolist()
-                if '主力連買動態' in cols and '股票名稱' in cols:
-                    cols.insert(cols.index('股票名稱')+1, cols.pop(cols.index('主力連買動態')))
-                    df_multi = df_multi[cols]
-
-            period_sel = st.selectbox("選擇統計期程", df_multi['統計期程'].unique(), key="multi_period_sel")
-            df_multi_disp = df_multi[df_multi['統計期程'] == period_sel].copy()
-            
-            if '期程買超張數' in df_multi_disp.columns and '期程均價' in df_multi_disp.columns:
-                df_multi_disp['斥資(億)'] = (df_multi_disp['期程買超張數'] * df_multi_disp['期程均價'] * 1000 / 100000000).round(2)
-                
-            format_dict = {'期程買超張數': "{:,.0f}", '期程均價': "{:.2f}", '斥資(億)': "{:.2f}"}
-            st.dataframe(df_multi_disp.style.format(format_dict).background_gradient(subset=['斥資(億)'], cmap='Reds'), use_container_width=True, hide_index=True)
         else:
             st.info("資料載入中或後台尚未產出今日資料。")
 
