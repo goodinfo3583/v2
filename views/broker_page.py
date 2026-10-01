@@ -435,7 +435,7 @@ def render(STOCK_DICT=None):
             st.info("資料載入中或後台尚未產出今日資料。")
 
     # ==========================================
-    # 🔹 單一主力成本分析(豆腐好吃) (已移除前台繁重計算)
+    # 🔹 單一主力成本分析(豆腐好吃) (已升級多期程下拉選單)
     # ==========================================
     with scan_tab2:
         df_tofu = fetch_parquet_from_hf("scan_依股價乖離率吃豆腐排行.parquet")
@@ -447,9 +447,18 @@ def render(STOCK_DICT=None):
                     cols.insert(cols.index('股票代號')+1, cols.pop(cols.index('股票名稱')))
                     df_tofu = df_tofu[cols]
                 
+            # 💡 新增：下拉式選單以過濾統計期程
+            if '統計期程' in df_tofu.columns:
+                # 定義排序，確保下拉選單依照 1日 -> 5日 -> 20日 的順序顯示
+                available_periods = sorted(df_tofu['統計期程'].unique(), key=lambda x: int(x.replace('日','')) if x.replace('日','').isdigit() else 99)
+                period_sel_tofu = st.selectbox("選擇成本防守期程", available_periods, key="tofu_period_sel")
+                df_tofu_disp = df_tofu[df_tofu['統計期程'] == period_sel_tofu].copy()
+            else:
+                df_tofu_disp = df_tofu.copy()
+                
             # 純顯示，直接套用格式！
             format_dict = {'主力成本': "{:.2f}", '最新股價': "{:.2f}", '乖離率(%)': "{:.2f}", '主力囤貨(張)': "{:,.1f}", '斥資(萬)': "{:,.0f}"}
-            st.dataframe(df_tofu.style.format(format_dict).background_gradient(subset=['乖離率(%)'], cmap='coolwarm_r'), use_container_width=True, hide_index=True)
+            st.dataframe(df_tofu_disp.style.format(format_dict).background_gradient(subset=['乖離率(%)'], cmap='coolwarm_r'), use_container_width=True, hide_index=True)
         else:
             st.info("資料載入中或後台尚未產出今日資料。")
 
