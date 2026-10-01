@@ -466,20 +466,16 @@ def render(STOCK_DICT=None):
 
     st.markdown("### 📈 全市場籌碼集中動能 (Δ) 排行榜 (Top 200)")
     df_momentum = fetch_parquet_from_hf("momentum_latest.parquet")
-    calc_days_str = fetch_text_from_hf("momentum_meta.txt")
-    try:
-        calc_days = int(calc_days_str)
-    except:
-        calc_days = 6
 
     if not df_momentum.empty:
         if STOCK_DICT and '股票代號' in df_momentum.columns:
             df_momentum['股票名稱'] = df_momentum['股票代號'].astype(str).apply(lambda x: STOCK_DICT.get(x, {}).get('name', '-'))
         
+        # 💡 自動偵測後台是否有算出 10/20/30 日的欄位，不再依賴容易出錯的 meta.txt
         tabs_names = ["🔹 單日集中度 Δ", "🔹 5日集中度 Δ"]
-        if calc_days >= 11: tabs_names.append("🔹 10日集中度 Δ")
-        if calc_days >= 21: tabs_names.append("🔹 20日集中度 Δ")
-        if calc_days >= 31: tabs_names.append("🔹 30日集中度 Δ")
+        if '10日Δ' in df_momentum.columns: tabs_names.append("🔹 10日集中度 Δ")
+        if '20日Δ' in df_momentum.columns: tabs_names.append("🔹 20日集中度 Δ")
+        if '30日Δ' in df_momentum.columns: tabs_names.append("🔹 30日集中度 Δ")
         
         mom_tabs = st.tabs(tabs_names)
         
@@ -514,14 +510,20 @@ def render(STOCK_DICT=None):
             
             st.dataframe(styled, use_container_width=True)
 
+        # 💡 依序渲染分頁 (自動匹配)
         with mom_tabs[0]: render_momentum_tab(df_momentum, "單日")
         with mom_tabs[1]: render_momentum_tab(df_momentum, "5日")
-        if calc_days >= 11:
-            with mom_tabs[2]: render_momentum_tab(df_momentum, "10日")
-        if calc_days >= 21:
-            with mom_tabs[3]: render_momentum_tab(df_momentum, "20日")
-        if calc_days >= 31:
-            with mom_tabs[4]: render_momentum_tab(df_momentum, "30日")
+        
+        tab_idx = 2
+        if '10日Δ' in df_momentum.columns:
+            with mom_tabs[tab_idx]: render_momentum_tab(df_momentum, "10日")
+            tab_idx += 1
+        if '20日Δ' in df_momentum.columns:
+            with mom_tabs[tab_idx]: render_momentum_tab(df_momentum, "20日")
+            tab_idx += 1
+        if '30日Δ' in df_momentum.columns:
+            with mom_tabs[tab_idx]: render_momentum_tab(df_momentum, "30日")
+            tab_idx += 1
     else:
         st.info("動能資料載入中或後台尚未產出今日資料。")
 
