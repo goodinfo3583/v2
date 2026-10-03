@@ -729,7 +729,7 @@ def render_options_dashboard():
     df_opt = df_opt[df_opt[col_month] == front_month].copy()
 
     df_opt[col_strike] = pd.to_numeric(df_opt[col_strike], errors='coerce')
-    df_opt[col_oi] = pd.to_numeric(df_opt[col_oi].astype(str).strreplace(',', ''), errors='coerce').fillna(0)
+    df_opt[col_oi] = pd.to_numeric(df_opt[col_oi].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
 
     df_call = df_opt[df_opt[col_type].str.contains('Call|買權', case=False, na=False)].copy()
     df_put = df_opt[df_opt[col_type].str.contains('Put|賣權', case=False, na=False)].copy()
