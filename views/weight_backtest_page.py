@@ -323,13 +323,37 @@ def show_weight_backtest_page(STOCK_DICT, DATA_DIR="data"):
     with col_title: st.markdown(f"#### 1️⃣ 設定嚴格過濾條件 (目前總候選池共 {len(base_df)} 檔)")
     with col_reset:
         def reset_filters():            
-            for k in ['b0_vol', 'b0_amt', 'b0_per', 'b0_explode_ratio', 'b8_day_streak', 'b8_week_streak', 'b8_buy_vol_min', 'b8_top15_money', 'b8_tofu_money']: st.session_state[f'filter_{k}'] = 0
-            for k in ['b0_price', 'b0_pct', 'b1_ratio', 'b1_5d_chg', 'b1_60d_chg', 'b1_20d_chg', 'b1_120d_chg', 'b4_price_chg', 'b7_hold_pct', 'b7_pledge_pct', 'b8_tofu_bias']: st.session_state[f'filter_{k}'] = (-100.0, 100.0) if 'chg' in k else (0.0, 25000.0) if 'price' in k else (-10.0, 10.0) if 'pct' in k else (0.0, 100.0)
-            for k in ['b1_radio', 'b2_radio', 'b3_radio', 'b4_radio']: st.session_state[f'filter_{k}'] = "交集 (必須同時符合勾選的所有特徵)"
-            for k in ['b1_delta', 'b1_5d', 'b1_20d', 'b1_60d', 'b1_120d', 'b2_1', 'b2_2', 'b2_3', 'b2_4', 'b3_fo_day', 'b3_it_day', 'b3_fo_wk', 'b3_it_wk', 'b6_today', 'b7_6m_inc', 'b8_mom_slope'] + [f'b4_{x}' for x in ['pct_41', 'vol_41', 'pct_42', 'vol_42', 'pct_43', 'vol_43', 'pct_inc_margin', 'pct_inc_short', 'amt_short_dec', 'amt_short_inc', 'acc_margin_dec', 'acc_sbl_dec', 'acc_margin_inc', 'acc_sbl_inc']] + [f'b5_{x}' for x in ['long_short', 'double', '6w_1000', '6w_800', '6w_600', '6w_400']]: st.session_state[f'filter_{k}'] = False
-            for k in ['b0_vp_status', 'b0_fund_trend', 'b1_multi', 'b2_multi', 'b3_multi', 'b4_multi', 'b5_trend_1000', 'b5_trend_800', 'b5_trend_600', 'b5_trend_400', 'b6_status', 'b7_hold_trend', 'b7_pledge_trend', 'b8_top15_trend', 'b8_tofu_trend', 'b8_mom_period', 'b8_mom_trend']: st.session_state[f'filter_{k}'] = []
+            # 加入 'b6_amt_min' 到數值型歸零清單
+            for k in ['b0_vol', 'b0_amt', 'b0_per', 'b0_explode_ratio', 'b8_day_streak', 'b8_week_streak', 'b8_buy_vol_min', 'b8_top15_money', 'b8_tofu_money', 'b6_amt_min']: 
+                st.session_state[f'filter_{k}'] = 0
+            
+            # 使用字典明確指定每一個 Slider 的正確預設區間，避免超出邊界 (StreamlitValueBelowMinError)
+            slider_defaults = {
+                'filter_b0_price': (0.0, 25000.0),
+                'filter_b0_pct': (-10.0, 10.0),
+                'filter_b1_ratio': (0.0, 100.0),
+                'filter_b1_5d_chg': (-100.0, 100.0),
+                'filter_b1_20d_chg': (-100.0, 100.0),
+                'filter_b1_60d_chg': (-100.0, 100.0),
+                'filter_b1_120d_chg': (-100.0, 100.0),
+                'filter_b4_price_chg': (-10.0, 10.0),
+                'filter_b7_hold_pct': (0.0, 100.0),
+                'filter_b7_pledge_pct': (0.0, 100.0),
+                'filter_b8_tofu_bias': (-30.0, 30.0)
+            }
+            for k, v in slider_defaults.items():
+                st.session_state[k] = v
+                
+            for k in ['b1_radio', 'b2_radio', 'b3_radio', 'b4_radio']: 
+                st.session_state[f'filter_{k}'] = "交集 (必須同時符合勾選的所有特徵)"
+                
+            for k in ['b1_delta', 'b1_5d', 'b1_20d', 'b1_60d', 'b1_120d', 'b2_1', 'b2_2', 'b2_3', 'b2_4', 'b3_fo_day', 'b3_it_day', 'b3_fo_wk', 'b3_it_wk', 'b6_today', 'b7_6m_inc', 'b8_mom_slope'] + [f'b4_{x}' for x in ['pct_41', 'vol_41', 'pct_42', 'vol_42', 'pct_43', 'vol_43', 'pct_inc_margin', 'pct_inc_short', 'amt_short_dec', 'amt_short_inc', 'acc_margin_dec', 'acc_sbl_dec', 'acc_margin_inc', 'acc_sbl_inc']] + [f'b5_{x}' for x in ['long_short', 'double', '6w_1000', '6w_800', '6w_600', '6w_400']]: 
+                st.session_state[f'filter_{k}'] = False
+                
+            for k in ['b0_vp_status', 'b0_fund_trend', 'b1_multi', 'b2_multi', 'b3_multi', 'b4_multi', 'b5_trend_1000', 'b5_trend_800', 'b5_trend_600', 'b5_trend_400', 'b6_status', 'b7_hold_trend', 'b7_pledge_trend', 'b8_top15_trend', 'b8_tofu_trend', 'b8_mom_period', 'b8_mom_trend']: 
+                st.session_state[f'filter_{k}'] = []
+                
             st.session_state['filter_b2_top_n'] = st.session_state['filter_b4_top_n'] = 50
-            st.session_state['filter_b0_price'] = (0.0, 25000.0)
         st.button("清空過濾條件", icon=":material/ink_eraser:", on_click=reset_filters, use_container_width=True)
 
     filtered_df = base_df.copy()
