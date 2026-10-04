@@ -54,7 +54,7 @@
 
 │   ├── 📄 news\_page.py          # 市場消息
 
-│   ├── 📄 broker\_page.py       # 券商分點-本地端後臺運算(daily\_batch.py上傳至hugging face)
+│   ├── 📄 broker\_page.py       # 券商分點、(查詢集中度、主力成本等-透過本地端"daily\_batch.py"後臺運算上傳至hugging face)
 
 │   ├── 📄 contact\_page.py       # 聯絡我們 (寫入 G-Sheets)
 
