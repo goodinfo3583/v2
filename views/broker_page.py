@@ -396,7 +396,7 @@ def render(STOCK_DICT=None):
     st.markdown(f"""券商動向基準日：{latest_date}""", unsafe_allow_html=True)
     st.markdown("### 🌍 全市場連買分點快搜")
     
-    scan_tab1, scan_tab2 = st.tabs(["🔹 多期程主力買超", "🔹 單一主力成本分析(豆腐好吃)"])
+    scan_tab1, scan_tab2 = st.tabs(["🔹 TOP15多期程主力買超", "🔹 單一券商成本分析(豆腐好吃)"])
 
     # ==========================================
     # 🔹 多期程主力買超 (已移除前台繁重計算)
