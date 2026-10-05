@@ -121,15 +121,32 @@ def process_b0_features(DATA_DIR, OUTPUT_DIR):
 # ==========================================
 # 模組二：B1 法人軌跡與籌碼結構運算
 # ==========================================
-def process_b1_features(DATA_DIR):
-    print("▶️ [2/5] 開始處理 B1 法人軌跡與籌碼結構...")
-    f_up_history = glob.glob(os.path.join(DATA_DIR, "*JSON_History.csv"))
-    f_down_history = glob.glob(os.path.join(DATA_DIR, "*Down_History.csv"))
-    f_foreign_ratio = glob.glob(os.path.join(DATA_DIR, "*外資持股比例*.parquet")) + glob.glob(os.path.join(DATA_DIR, "*外資持股比例*.csv"))
+def process_b1_features(DATA_DIR, target_date):
+    # 解決 target_date (如 '1005') 與檔案日期 (如 '20261002') 長度不同導致比對錯誤的 Bug
+    clean_target = str(target_date).replace('/', '').replace('-', '')
+    if len(clean_target) == 4:
+        full_target_date = f"2026{clean_target}" # 補齊為 8 碼 YYYYMMDD
+    else:
+        full_target_date = clean_target
+
+    print(f"▶️ [2/5] 開始處理 B1 法人軌跡與籌碼結構 (強制對齊基準日: {full_target_date})...")
+    
+    def align_files_to_target(files):
+        valid = [f for f in files if extract_date_from_name(f) <= full_target_date]
+        valid = sorted(valid, key=extract_date_from_name, reverse=True)
+        if valid and extract_date_from_name(valid[0]) != full_target_date:
+            print(f"  ⚠️ 警告: B1 缺乏 {full_target_date} 資料，強行保留 Schema 並填補空值。")
+            valid.insert(0, None)
+        return valid
+
+    f_up_history = align_files_to_target(glob.glob(os.path.join(DATA_DIR, "*JSON_History.csv")))
+    f_down_history = align_files_to_target(glob.glob(os.path.join(DATA_DIR, "*Down_History.csv")))
+    f_foreign_ratio = align_files_to_target(glob.glob(os.path.join(DATA_DIR, "*外資持股比例*.parquet")) + glob.glob(os.path.join(DATA_DIR, "*外資持股比例*.csv")))
     
     df_up, df_down, df_fi, d_cols = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
     
-    for i, file in enumerate(sorted(f_up_history, key=extract_date_from_name, reverse=True)[:4]):
+    for i, file in enumerate(f_up_history[:4]):
+        if file is None: continue
         try:
             df = pd.read_csv(file, encoding='utf-8-sig')
             df.columns = [str(c).replace(" ", "").strip() for c in df.columns]
@@ -139,13 +156,18 @@ def process_b1_features(DATA_DIR):
                 df_up, d_cols = df, ['B1_正向_法人持股(%)']
             else:
                 col_name, sec_name = f'持股%_{i}', f'區塊_{i}'
-                df = df[['stock_code', '法人持股', '上榜區塊']].rename(columns={'法人持股': col_name, '上榜區塊': sec_name}) if '上榜區塊' in df.columns else df[['stock_code', '法人持股']].assign(上榜區塊="").rename(columns={'法人持股': col_name, '上榜區塊': sec_name})
-                df_up = pd.merge(df_up, df, on='stock_code', how='left')
+                if '上榜區塊' in df.columns:
+                    df = df[['stock_code', '法人持股', '上榜區塊']].rename(columns={'法人持股': col_name, '上榜區塊': sec_name})
+                else:
+                    df = df[['stock_code', '法人持股']].assign(上榜區塊="").rename(columns={'法人持股': col_name, '上榜區塊': sec_name})
+                
+                if df_up.empty: df_up = df[['stock_code']].copy()
+                df_up = pd.merge(df_up, df, on='stock_code', how='outer')
                 d_cols.append(col_name)
         except Exception: pass
-    for c in d_cols: df_up[c] = pd.to_numeric(df_up[c], errors='coerce')
-
-    for i, file in enumerate(sorted(f_down_history, key=extract_date_from_name, reverse=True)[:2]):
+        
+    for i, file in enumerate(f_down_history[:2]):
+        if file is None: continue
         try:
             df = pd.read_csv(file, encoding='utf-8-sig')
             df.columns = [str(c).replace(" ", "").strip() for c in df.columns]
@@ -155,10 +177,12 @@ def process_b1_features(DATA_DIR):
                 df_down = df
             else:
                 df_t1 = df[['stock_code', '法人持股']].rename(columns={'法人持股': 'B1_衰退_法人持股(%)_T1'})
-                df_down = pd.merge(df_down, df_t1, on='stock_code', how='left')
+                if df_down.empty: df_down = df_t1[['stock_code']].copy()
+                df_down = pd.merge(df_down, df_t1, on='stock_code', how='outer')
         except Exception: pass
 
-    for i, file in enumerate(sorted(f_foreign_ratio, key=extract_date_from_name, reverse=True)[:2]):
+    for i, file in enumerate(f_foreign_ratio[:2]):
+        if file is None: continue
         try:
             df = pd.read_parquet(file) if file.endswith('.parquet') else pd.read_csv(file, encoding='utf-8-sig')
             df.columns = [str(c).replace(" ", "").replace("\n", "").strip() for c in df.columns]
@@ -176,35 +200,53 @@ def process_b1_features(DATA_DIR):
                     df_t1 = df[[id_col, val_col]].rename(columns={id_col: 'stock_code', val_col: 'B1_外資持股(%)_T1'})
                     df_t1['stock_code'] = df_t1['stock_code'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.zfill(4)
                     df_t1['B1_外資持股(%)_T1'] = pd.to_numeric(df_t1['B1_外資持股(%)_T1'].astype(str).str.replace(r'[%,\s]', '', regex=True), errors='coerce')
-                    df_fi = pd.merge(df_fi, df_t1, on='stock_code', how='left')
+                    if df_fi.empty: df_fi = df_t1[['stock_code']].copy()
+                    df_fi = pd.merge(df_fi, df_t1, on='stock_code', how='outer')
         except Exception: pass
 
     dfs = [df for df in [df_up, df_down, df_fi] if not df.empty]
-    if not dfs: return None
-    master_b1 = dfs[0]
-    for df in dfs[1:]: master_b1 = pd.merge(master_b1, df, on='stock_code', how='outer')
+    if not dfs: 
+        # 如果極端情況完全沒有歷史檔案，依然產出具有 stock_code 欄位的空表
+        master_b1 = pd.DataFrame(columns=['stock_code'])
+    else:
+        master_b1 = dfs[0]
+        for df in dfs[1:]: master_b1 = pd.merge(master_b1, df, on='stock_code', how='outer')
 
+    # 🛡️【終極 Schema 保衛戰】在此一次性注入所有 B1 核心欄位，確保絕對不消失
+    core_cols = [
+        'B1_正向_法人持股(%)', 'B1_衰退_法人持股(%)', '持股%_1', 'B1_衰退_法人持股(%)_T1',
+        'B1_外資持股(%)', 'B1_外資持股(%)_T1', 'B1_外資持有(千張)', 
+        'B1_外資買賣超張數', 'B1_投信買賣超張數', 'B1_自營買賣超張數', 'B1_合計買賣超張數'
+    ]
+    for c in core_cols:
+        if c not in master_b1.columns: 
+            master_b1[c] = np.nan
+
+    # 開始執行原本的計算邏輯
     master_b1['B1_正向上榜區塊'] = master_b1.get('B1_正向上榜區塊', pd.Series(dtype=str)).fillna("")
     master_b1['B1_負向上榜區塊'] = master_b1.get('B1_負向上榜區塊', pd.Series(dtype=str)).fillna("")
-    master_b1['B1_總法人持股(%)'] = master_b1.get('B1_正向_法人持股(%)', pd.Series(dtype=float)).combine_first(master_b1.get('B1_衰退_法人持股(%)', pd.Series(dtype=float)))
-    master_b1['B1_1日△Change'] = master_b1['B1_總法人持股(%)'] - master_b1.get('持股%_1', pd.Series(np.nan, index=master_b1.index)).combine_first(master_b1.get('B1_衰退_法人持股(%)_T1', pd.Series(np.nan, index=master_b1.index)))
+    
+    master_b1['B1_總法人持股(%)'] = master_b1['B1_正向_法人持股(%)'].combine_first(master_b1['B1_衰退_法人持股(%)'])
+    master_b1['B1_1日△Change'] = master_b1['B1_總法人持股(%)'] - master_b1['持股%_1'].combine_first(master_b1['B1_衰退_法人持股(%)_T1'])
 
-    if 'B1_外資持股(%)' in master_b1.columns:
-        master_b1['B1_估內資持股(%)'] = (master_b1['B1_總法人持股(%)'] - master_b1['B1_外資持股(%)']).clip(lower=0)
-        if 'B1_外資持股(%)_T1' in master_b1.columns: master_b1['B1_外資1日△Change'] = master_b1['B1_外資持股(%)'] - master_b1['B1_外資持股(%)_T1']
+    master_b1['B1_估內資持股(%)'] = (master_b1['B1_總法人持股(%)'] - master_b1['B1_外資持股(%)']).clip(lower=0)
+    master_b1['B1_外資1日△Change'] = master_b1['B1_外資持股(%)'] - master_b1['B1_外資持股(%)_T1']
 
     json_dfs = fetch_github_json_all()
     for d in [5, 20, 60, 120]:
-        if d in json_dfs and not json_dfs[d].empty: master_b1 = pd.merge(master_b1, json_dfs[d], on='stock_code', how='left')
-        else: master_b1[f'B1_{d}日△Change'] = master_b1[f'B1_{d}日排名'] = np.nan
+        if d in json_dfs and not json_dfs[d].empty: 
+            master_b1 = pd.merge(master_b1, json_dfs[d], on='stock_code', how='left')
+        else: 
+            master_b1[f'B1_{d}日△Change'] = np.nan
+            master_b1[f'B1_{d}日排名'] = np.nan
 
-    if 'B1_外資持有(千張)' in master_b1.columns and 'B1_外資持股(%)' in master_b1.columns:
-        master_b1['估算總發行張數'] = np.where(master_b1['B1_外資持股(%)'] > 0, (master_b1['B1_外資持有(千張)'] * 1000) / (master_b1['B1_外資持股(%)'] / 100), np.nan)
+    master_b1['估算總發行張數'] = np.where(master_b1['B1_外資持股(%)'] > 0, (master_b1['B1_外資持有(千張)'] * 1000) / (master_b1['B1_外資持股(%)'] / 100), np.nan)
 
     master_b1['B1_法人軌跡動態'] = master_b1.apply(lambda r: "⚠️ 多空交戰 (籌碼分歧)" if str(r.get('B1_正向上榜區塊', '')) and str(r.get('B1_負向上榜區塊', '')) else ("👑 長線吸籌" if '120日' in str(r.get('B1_正向上榜區塊', '')) or '60日' in str(r.get('B1_正向上榜區塊', '')) else ("🔥 波段佈局" if '20日' in str(r.get('B1_正向上榜區塊', '')) else "🚀 短線點火")) if str(r.get('B1_正向上榜區塊', '')) else ("☠️ 長線提款" if '30日' in str(r.get('B1_負向上榜區塊', '')) or '20日' in str(r.get('B1_負向上榜區塊', '')) else "🩸 短線棄守") if str(r.get('B1_負向上榜區塊', '')) else "⚪ 無明顯軌跡", axis=1)
 
-    cols_drop = [c for c in d_cols if c != 'B1_正向_法人持股(%)'] + ['區塊_1', '區塊_2', '區塊_3', 'B1_衰退_法人持股(%)_T1', 'B1_總法人持股(%)_T1', 'B1_外資持股(%)_T1']
-    master_b1.drop(columns=[c for c in cols_drop if c in master_b1.columns], inplace=True)
+    cols_drop = [c for c in d_cols if c != 'B1_正向_法人持股(%)'] + ['區塊_1', '區塊_2', '區塊_3', 'B1_衰退_法人持股(%)_T1', 'B1_總法人持股(%)_T1', 'B1_外資持股(%)_T1', '持股%_1']
+    master_b1.drop(columns=[c for c in cols_drop if c in master_b1.columns], inplace=True, errors='ignore')
+    
     return master_b1
 
 # ==========================================
@@ -483,7 +525,6 @@ def process_b4_features(DATA_DIR):
 
     return master_b4
 
-
 # ==========================================
 # 模組五：大一統合併與終極精算 (包含反碎片化與重排序)
 # ==========================================
@@ -492,14 +533,15 @@ def run_master_pipeline():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
     df_b0, date_prefix = process_b0_features(DATA_DIR, OUTPUT_DIR)
-    df_b1 = process_b1_features(DATA_DIR)
-    df_b23 = process_b2_b3_features(DATA_DIR)
-    df_b4 = process_b4_features(DATA_DIR)
     
     if df_b0 is None:
         return print("❌ 缺少 B0 基礎檔案，合併失敗。")
         
-    print("▶️️ [5/5] 執行 B0+B1+B2+B3+B4 大一統合併與防呆淨化...")
+    print(f"▶ [5/5] 執行大一統合併與防呆淨化 (目標交易日: {date_prefix})...")
+    
+    df_b1 = process_b1_features(DATA_DIR, target_date=date_prefix)
+    df_b23 = process_b2_b3_features(DATA_DIR)
+    df_b4 = process_b4_features(DATA_DIR)
     
     drop_targets = ['股票代號', '股票名稱', '證券代號', '證券名稱', '名稱', '日期', '排名']
     for df in [df_b0, df_b1, df_b23, df_b4]:
@@ -553,6 +595,8 @@ def run_master_pipeline():
 
     out_parquet, out_csv = f"{OUTPUT_DIR}/{date_prefix}_master_features.parquet", f"{OUTPUT_DIR}/{date_prefix}_master_features.csv"
     df_master.to_parquet(out_parquet, index=False)
+    
+    # 已經幫你把編碼改回 utf-8-sig 讓你方便使用 Excel 檢查了！
     df_master.to_csv(out_csv, index=False, encoding='utf-8-sig')
     
     print(f"\n🎉 完美大一統 B0~B4 ETL 執行完畢！")
