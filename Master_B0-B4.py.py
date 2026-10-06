@@ -682,17 +682,33 @@ def process_b7_features(DATA_DIR):
         if len(m_cols_p) >= 2:
             pivot_p['B7_近月質押增減(%)'] = (pivot_p[m_cols_p[0]] - pivot_p[m_cols_p[1]]).round(2)
             pivot_p['B7_最新質押比(%)'] = pivot_p[m_cols_p[0]]
+            # 👇 修改這裡：增加高質押比的判定 👇
+            def get_pledge_trend(row):
+                val = row['B7_近月質押增減(%)']
+                latest_ratio = row['B7_最新質押比(%)']
+                
+                # 先抓出基本動態
+                if pd.isna(val): base_trend = "⚪ 無資料"
+                elif val >= 5.0: base_trend = "🚨 暴增"
+                elif val >= 1.0: base_trend = "⚠️ 大增"
+                elif val > 0:    base_trend = "↗️ 微增"
+                elif val == 0:   base_trend = "➖ 持平"
+                elif val <= -5.0: base_trend = "🌟 遽減"
+                elif val <= -1.0: base_trend = "✅ 大減"
+                else:            base_trend = "↘️ 微減"
+                
+                # 如果質押比大於 50%，強制掛上高危險標籤
+                if pd.notna(latest_ratio) and latest_ratio >= 50.0:
+                    return f"🔥極度危險 ({base_trend})"
+                elif pd.notna(latest_ratio) and latest_ratio >= 30.0:
+                    return f"⚠️警戒區 ({base_trend})"
+                else:
+                    return base_trend
+
+            # 注意！這裡 apply 的寫法改為 axis=1 因為我們要同時讀兩個欄位
+            pivot_p['B7_質押動態'] = pivot_p.apply(get_pledge_trend, axis=1)
+            # 👆 修改到這裡 👆
             
-            def get_pledge_trend(val):
-                if pd.isna(val): return "⚪ 無資料"
-                if val >= 5.0: return "🚨 暴增"
-                if val >= 1.0: return "⚠️ 大增"
-                if val > 0: return "↗️ 微增"
-                if val == 0: return "➖ 持平"
-                if val <= -5.0: return "🌟 遽減"
-                if val <= -1.0: return "✅ 大減"
-                return "↘️ 微減"
-            pivot_p['B7_質押動態'] = pivot_p['B7_近月質押增減(%)'].apply(get_pledge_trend)
             df_b7_features = pd.merge(df_b7_features, pivot_p[['stock_code', 'B7_最新質押比(%)', 'B7_近月質押增減(%)', 'B7_質押動態']], on='stock_code', how='left')
 
     # --- 3. 抓取其他最新數據 ---
@@ -710,7 +726,174 @@ def process_b7_features(DATA_DIR):
         df_b7_features = pd.merge(df_b7_features, latest_df[['stock_code', 'B7_董監質押(萬張)']], on='stock_code', how='left')
 
     return df_b7_features
+# ==========================================
+# 模組新增：B5 大股東持股動向 (週級別特徵)
+# ==========================================
+def process_major_shareholders_for_master(DATA_DIR, target_level):
+    """擷取單一級距的 B5 大股東資料"""
+    files = []
+    for ext in ('*.parquet', '*.csv', '*.CSV'):
+        files.extend(glob.glob(os.path.join(DATA_DIR, f"*大股東*{ext}")))
+    if not files: return pd.DataFrame()
+    
+    groups = {}
+    for f in files:
+        m = re.search(r'(\d{8})', os.path.basename(f))
+        key = m.group(1) if m else "UNKNOWN"
+        groups.setdefault(key, []).append(f)
+    
+    merged, all_dates_4 = [], []
+    target_num = target_level.replace('1千', '1000').replace('千', '000')
 
+    for prefix, fs in sorted(groups.items(), reverse=True):
+        chunks = []
+        detected_date = None
+        
+        for f in fs:
+            df = None
+            if f.endswith('.parquet'):
+                try: df = pd.read_parquet(f)
+                except Exception: pass
+            else:
+                for enc in ['utf-8-sig', 'big5', 'cp950', 'utf-8']:
+                    try:
+                        df = pd.read_csv(f, encoding=enc)
+                        break 
+                    except: pass
+            
+            if df is None or df.empty: continue
+            
+            df.columns = [re.sub(r'[\s\n\r\t\u3000\ufeff]+', '', str(c)) for c in df.columns]
+            df = df.loc[:, ~df.columns.duplicated()]
+            
+            c_code = next((c for c in df.columns if '代號' in c or '代碼' in c), None)
+            c_name = next((c for c in df.columns if '名稱' in c), None)
+            c_date = next((c for c in df.columns if '日期' in c), None)
+            
+            c_abs = next((c for c in df.columns if (target_level in c or target_num in c) and ('%' in c or '比例' in c) and '增減' not in c and '差' not in c and ('超過' in c or '以上' in c)), None)
+            c_delta = next((c for c in df.columns if (target_level in c or target_num in c) and ('增減' in c or '差' in c) and ('超過' in c or '以上' in c)), None)
+            
+            is_inverted = False
+            if not c_abs or not c_delta:
+                c_abs = next((c for c in df.columns if (target_level in c or target_num in c) and ('%' in c or '比例' in c) and '增減' not in c and '差' not in c and '以下' in c), None)
+                c_delta = next((c for c in df.columns if (target_level in c or target_num in c) and ('增減' in c or '差' in c) and '以下' in c), None)
+                if c_abs and c_delta: is_inverted = True 
+            
+            if not all([c_code, c_name, c_abs, c_delta]): continue
+            
+            try:
+                df['stock_code'] = df[c_code].astype(str).str.extract(r'(\d+)', expand=False)
+                raw_abs = pd.to_numeric(df[c_abs].astype(str).str.replace('%', '', regex=False), errors='coerce').astype('float32')
+                raw_delta = pd.to_numeric(df[c_delta].astype(str).str.replace('+', '', regex=False).str.replace('%', '', regex=False), errors='coerce').astype('float32')
+                
+                if is_inverted:
+                    df['持股%'] = (100.0 - raw_abs.fillna(100.0)).astype('float32')
+                    df['增減%'] = (-1.0 * raw_delta.fillna(0.0)).astype('float32')
+                else:
+                    df['持股%'] = raw_abs
+                    df['增減%'] = raw_delta
+                
+                if detected_date is None and c_date and not df[c_date].dropna().empty:
+                    raw_date = str(df[c_date].dropna().iloc[0]).replace('/', '').replace('-', '').strip()
+                    detected_date = raw_date[-4:] if len(raw_date) >= 4 else prefix[-4:]
+                
+                chunks.append(df[['stock_code', '持股%', '增減%']].dropna(subset=['stock_code']))
+            except: continue
+        
+        if chunks:
+            comb = pd.concat(chunks, ignore_index=True)
+            comb = comb.drop_duplicates(subset=['stock_code'], keep='first').reset_index(drop=True)
+            date_4 = detected_date if detected_date else prefix[-4:]
+            comb = comb.rename(columns={'持股%': f"ABS_{date_4}", '增減%': f"DELTA_{date_4}"})
+            
+            if date_4 not in all_dates_4: 
+                all_dates_4.append(date_4)
+                merged.append(comb)
+            else:
+                idx = all_dates_4.index(date_4)
+                merged[idx] = pd.concat([merged[idx], comb]).drop_duplicates(subset=['stock_code'], keep='first').reset_index(drop=True)
+
+    if merged:
+        master = merged[0]
+        for m in merged[1:]: 
+            master = pd.merge(master, m, on='stock_code', how='outer')
+                
+        sorted_dates_4 = sorted(all_dates_4, reverse=True)
+        latest_date_4 = sorted_dates_4[0]
+        
+        rename_dict = {}
+        if f"ABS_{latest_date_4}" in master.columns:
+            rename_dict[f"ABS_{latest_date_4}"] = f"B5_{target_level}_最新持有(%)"
+            
+        for i, d in enumerate(sorted_dates_4[:6]): 
+            old_col = f"DELTA_{d}"
+            if old_col in master.columns:
+                new_col = f"B5_{target_level}_當週增減(%)" if i == 0 else f"B5_{target_level}_前{i}週增減(%)"
+                rename_dict[old_col] = new_col
+
+        calc_cols = [f"DELTA_{d}" for d in sorted_dates_4[:6] if f"DELTA_{d}" in master.columns]
+        six_week_col = f'B5_{target_level}_6週增減(%)'
+        
+        if len(calc_cols) < 6: master[six_week_col] = np.nan
+        else: master[six_week_col] = master[calc_cols].sum(axis=1, min_count=1).astype('float32')
+
+        def get_1w_trend(val):
+            if pd.isna(val): return "⚪ 無資料"
+            if val >= 1.5: return "🚀 劇增"
+            if val >= 1.0: return "🔥 大增"
+            if val >= 0.5: return "📈 小增"
+            if val > 0:    return "↗️ 微增"
+            if val == 0:   return "🔄 持平"
+            if val > -0.5: return "↘️ 微減"
+            if val > -1.0: return "📉 小減"
+            if val > -1.5: return "⚠️ 大減"
+            return "🚨 劇減"
+            
+        def get_6w_trend(val):
+            if pd.isna(val): return "⚪ 資料不足6週"
+            if val >= 5.0: return "🚀 長期劇增"
+            if val >= 3.0: return "🔥 長期大增"
+            if val >= 1.0: return "📈 長期小增"
+            if val > 0:    return "↗️ 長期微增"
+            if val == 0:   return "🔄 長期持平"
+            if val > -1.0: return "↘️ 長期微減"
+            if val > -3.0: return "📉 長期小減"
+            if val > -5.0: return "⚠️ 長期大減"
+            return "🚨 長期劇減"
+
+        master[f'B5_{target_level}週動態'] = master[f"DELTA_{latest_date_4}"].apply(get_1w_trend)
+        master[f'B5_{target_level}6週動態'] = master[six_week_col].apply(get_6w_trend)
+        
+        master = master.rename(columns=rename_dict)
+        cols_order = ['stock_code', f'B5_{target_level}週動態', f'B5_{target_level}6週動態', six_week_col]
+        if f"B5_{target_level}_最新持有(%)" in master.columns: cols_order.append(f"B5_{target_level}_最新持有(%)")
+        for new_col in rename_dict.values():
+            if new_col not in cols_order: cols_order.append(new_col)
+            
+        final_df = master[[c for c in cols_order if c in master.columns]].copy()
+        for c in final_df.select_dtypes(include=['float32', 'float64']).columns:
+            if '6週增減' not in c: final_df[c] = final_df[c].fillna(0.0)
+        return final_df
+    return pd.DataFrame()
+
+def process_b5_features(DATA_DIR):
+    print("▶️ [增補] 開始處理 B5 大股東籌碼特徵...")
+    levels = ['1千', '800', '600', '400', '200', '100']
+    dfs = []
+    for lvl in levels:
+        df = process_major_shareholders_for_master(DATA_DIR, lvl)
+        if not df.empty: dfs.append(df)
+            
+    if not dfs: return None
+        
+    master_b5 = dfs[0]
+    for df in dfs[1:]: master_b5 = pd.merge(master_b5, df, on='stock_code', how='outer')
+        
+    cond_1k_resonance = (master_b5.get('B5_1千_6週增減(%)', -1) > 0) & (master_b5.get('B5_1千_當週增減(%)', 0) > 0)
+    cond_400_resonance = (master_b5.get('B5_400_6週增減(%)', -1) > 0) & (master_b5.get('B5_400_當週增減(%)', 0) > 0)
+    master_b5['B5_大戶共振_雙增'] = (cond_1k_resonance & cond_400_resonance).map({True: '✔️', False: ''})
+    
+    return master_b5
 # ==========================================
 # 模組五：大一統合併與終極精算
 # ==========================================
@@ -729,17 +912,17 @@ def run_master_pipeline():
     df_b1 = process_b1_features(DATA_DIR, target_date)
     df_b23 = process_b2_b3_features(DATA_DIR, target_date)
     df_b4 = process_b4_features(DATA_DIR, target_date)
-    df_b6 = process_b6_features(DATA_DIR, target_date)
-    
+    df_b5 = process_b5_features(DATA_DIR)
+    df_b6 = process_b6_features(DATA_DIR, target_date)   
     # 👇 新增這行 👇 注意，B7是月更資料，不需要傳入嚴格的 target_date，它會自己抓取資料夾內最新的月份來算
     df_b7 = process_b7_features(DATA_DIR) 
 
-    print("▶️ [5/5] 執行 B0+B1+B2+B3+B4 大一統合併與防呆淨化...")
+    print("▶️ [5/5] 執行 B0+B1+B2+B3+B4+B5+B6+B7 表格淨化中...")
     
     drop_targets = ['股票代號', '股票名稱', '證券代號', '證券名稱', '名稱', '日期', '排名']
     
     # 👇 陣列裡補上 df_b7 👇
-    for df in [df_b0, df_b1, df_b23, df_b4, df_b6, df_b7]:
+    for df in [df_b0, df_b1, df_b23, df_b4, df_b5, df_b6, df_b7]:
         if df is not None:
             df.drop(columns=[c for c in drop_targets if c in df.columns], inplace=True, errors='ignore')
 
@@ -748,6 +931,7 @@ def run_master_pipeline():
     if df_b1 is not None: df_master = pd.merge(df_master, df_b1, on='stock_code', how='left')
     if df_b23 is not None: df_master = pd.merge(df_master, df_b23, on='stock_code', how='left')
     if df_b4 is not None: df_master = pd.merge(df_master, df_b4, on='stock_code', how='left')
+    if df_b5 is not None: df_master = pd.merge(df_master, df_b5, on='stock_code', how='left')
     if df_b6 is not None: df_master = pd.merge(df_master, df_b6, on='stock_code', how='left')
     if df_b7 is not None: df_master = pd.merge(df_master, df_b7, on='stock_code', how='left')
 
@@ -811,19 +995,18 @@ def run_master_pipeline():
 
     # 🧩 欄位智慧重排
     # 👇 將正則表達式改為包含 7 👇
-    base_and_b0 = [c for c in df_master.columns if not re.match(r'^B[123467]_', c)] 
+    base_and_b0 = [c for c in df_master.columns if not re.match(r'^B[1234567]_', c)] 
     
     b1_cols = [c for c in df_master.columns if c.startswith('B1_')]
     b2_cols = [c for c in df_master.columns if c.startswith('B2_')]
     b3_cols = [c for c in df_master.columns if c.startswith('B3_')]
     b4_cols = [c for c in df_master.columns if c.startswith('B4_')]
+    b5_cols = [c for c in df_master.columns if c.startswith('B5_')]
     b6_cols = [c for c in df_master.columns if c.startswith('B6_')]
-    
-    # 👇 新增抓取 B7 欄位 👇
     b7_cols = [c for c in df_master.columns if c.startswith('B7_')] 
     
     # 👇 串接進 ordered_cols 👇
-    ordered_cols = base_and_b0 + b1_cols + b2_cols + b3_cols + b4_cols + b6_cols + b7_cols
+    ordered_cols = base_and_b0 + b1_cols + b2_cols + b3_cols + b4_cols + b5_cols + b6_cols + b7_cols
     
     missing_cols = [c for c in df_master.columns if c not in ordered_cols]
     df_master = df_master[ordered_cols + missing_cols]
