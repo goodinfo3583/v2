@@ -1,4 +1,4 @@
-# master_etl_pipeline.py
+# master_etl_pipeline.py (B0-B4 拔除 B3 零值偏誤版)
 import pandas as pd
 import numpy as np
 import os
@@ -6,6 +6,7 @@ import glob
 import re
 import json
 import requests
+import datetime
 from collections import defaultdict
 
 def extract_date_from_name(filename):
@@ -75,7 +76,17 @@ def process_b0_features(DATA_DIR, OUTPUT_DIR):
     if not unique_dates: return None, None
     
     latest_date = unique_dates[0]
-    date_prefix = latest_date.replace('/', '').replace('-', '')
+    
+    clean_date = latest_date.replace('/', '').replace('-', '')
+    if len(clean_date) == 4:
+        target_date = str(datetime.datetime.now().year) + clean_date
+    elif len(clean_date) >= 8:
+        target_date = clean_date[-8:]
+        if not target_date.startswith("202"):
+            target_date = str(datetime.datetime.now().year) + clean_date[-4:]
+    else:
+        target_date = str(datetime.datetime.now().year) + clean_date[-4:]
+    
     df_today = combined_df[combined_df['trade_date'] == latest_date].copy()
     df_today['今日成交額(萬)'] = df_today['成交額_num'] * 100  
 
@@ -105,7 +116,7 @@ def process_b0_features(DATA_DIR, OUTPUT_DIR):
     ratio = tdy_vol / avg_v.replace(0, np.nan)
     v_s = np.select([ratio >= 1.5, ratio <= 0.7], ["放量", "縮量"], default="平量")
     p_s = np.select([tdy_pct >= 4.0, tdy_pct > 1.5, tdy_pct >= -1.5, tdy_pct > -4.0], ["大漲", "價升", "滯漲", "小跌"], default="大跌")
-    status_map = {"放量大漲":"🚀 放量大漲", "縮量大漲":"🔒 縮量大漲", "平量大漲":"✈️ 平量大漲", "縮量價升":"📈 價升量縮", "放量滯漲":"⚠️ 放量滯漲", "平量滯漲":"⏸ 平量滯漲", "縮量小跌":"📉 縮量小跌", "放量小跌":"🛡️ 放量小跌", "平量小跌":"🥀 平量價縮", "縮量大跌":"☠️ 縮量大跌", "放量大跌":"🩸 放量大跌", "平量大跌":"🕳 平量大跌"}
+    status_map = {"放量大漲":"🚀 放量大漲", "縮量大漲":"🔒 縮量大漲", "平量大漲":"✈️ 平量大漲", "縮量價升":"📈 價升量縮", "放量滯漲":"⚠️ 放量滯漲", "平量滯漲":"⏸ 平量滯漲", "縮量小跌":"📉 縮量小跌", "放量小跌":"🛡️ 放量小跌", "平量小跌":"🥀 平量價縮", "縮量大跌":"☠ 縮量大跌", "放量大跌":"🩸 放量大跌", "平量大跌":"🕳 平量大跌"}
     df_today['B0_量價狀態'] = pd.Series(v_s + p_s).map(status_map).fillna("⚖ 溫和震盪整理").values
 
     t_amt, m5, m10, m20 = df_today['今日成交額(萬)'].fillna(0), df_today['5日均額(萬)'].fillna(0), df_today['10日均額(萬)'].fillna(0), df_today['20日均額(萬)'].fillna(0)
@@ -116,20 +127,27 @@ def process_b0_features(DATA_DIR, OUTPUT_DIR):
     dynamic_cols = []
     for p in periods: dynamic_cols.extend([f'{p}日均價', f'{p}日均額(萬)', f'{p}日均量(張)', f'較{p}日均額增加(萬)', f'{p}日爆發倍數'])
         
-    return df_today[[c for c in (base_cols + dynamic_cols) if c in df_today.columns]].copy(), date_prefix
+    return df_today[[c for c in (base_cols + dynamic_cols) if c in df_today.columns]].copy(), target_date
 
 # ==========================================
 # 模組二：B1 法人軌跡與籌碼結構運算
 # ==========================================
-def process_b1_features(DATA_DIR):
-    print("▶️ [2/5] 開始處理 B1 法人軌跡與籌碼結構...")
-    f_up_history = glob.glob(os.path.join(DATA_DIR, "*JSON_History.csv"))
-    f_down_history = glob.glob(os.path.join(DATA_DIR, "*Down_History.csv"))
-    f_foreign_ratio = glob.glob(os.path.join(DATA_DIR, "*外資持股比例*.parquet")) + glob.glob(os.path.join(DATA_DIR, "*外資持股比例*.csv"))
+def process_b1_features(DATA_DIR, target_date):
+    print(f"▶️️ [2/5] 開始處理 B1 法人軌跡與籌碼結構 (對齊基準日: {target_date})...")
+    
+    def get_aligned_history(files):
+        valid = sorted([f for f in files if extract_date_from_name(f) <= target_date], key=extract_date_from_name, reverse=True)
+        if not valid or extract_date_from_name(valid[0]) != target_date:
+            return [] 
+        return valid
+
+    f_up_history = get_aligned_history(glob.glob(os.path.join(DATA_DIR, "*JSON_History.csv")))
+    f_down_history = get_aligned_history(glob.glob(os.path.join(DATA_DIR, "*Down_History.csv")))
+    f_foreign_ratio = get_aligned_history(glob.glob(os.path.join(DATA_DIR, "*外資持股比例*.parquet")) + glob.glob(os.path.join(DATA_DIR, "*外資持股比例*.csv")))
     
     df_up, df_down, df_fi, d_cols = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
     
-    for i, file in enumerate(sorted(f_up_history, key=extract_date_from_name, reverse=True)[:4]):
+    for i, file in enumerate(f_up_history[:4]):
         try:
             df = pd.read_csv(file, encoding='utf-8-sig')
             df.columns = [str(c).replace(" ", "").strip() for c in df.columns]
@@ -145,7 +163,7 @@ def process_b1_features(DATA_DIR):
         except Exception: pass
     for c in d_cols: df_up[c] = pd.to_numeric(df_up[c], errors='coerce')
 
-    for i, file in enumerate(sorted(f_down_history, key=extract_date_from_name, reverse=True)[:2]):
+    for i, file in enumerate(f_down_history[:2]):
         try:
             df = pd.read_csv(file, encoding='utf-8-sig')
             df.columns = [str(c).replace(" ", "").strip() for c in df.columns]
@@ -158,7 +176,7 @@ def process_b1_features(DATA_DIR):
                 df_down = pd.merge(df_down, df_t1, on='stock_code', how='left')
         except Exception: pass
 
-    for i, file in enumerate(sorted(f_foreign_ratio, key=extract_date_from_name, reverse=True)[:2]):
+    for i, file in enumerate(f_foreign_ratio[:2]):
         try:
             df = pd.read_parquet(file) if file.endswith('.parquet') else pd.read_csv(file, encoding='utf-8-sig')
             df.columns = [str(c).replace(" ", "").replace("\n", "").strip() for c in df.columns]
@@ -187,11 +205,24 @@ def process_b1_features(DATA_DIR):
     master_b1['B1_正向上榜區塊'] = master_b1.get('B1_正向上榜區塊', pd.Series(dtype=str)).fillna("")
     master_b1['B1_負向上榜區塊'] = master_b1.get('B1_負向上榜區塊', pd.Series(dtype=str)).fillna("")
     master_b1['B1_總法人持股(%)'] = master_b1.get('B1_正向_法人持股(%)', pd.Series(dtype=float)).combine_first(master_b1.get('B1_衰退_法人持股(%)', pd.Series(dtype=float)))
-    master_b1['B1_1日△Change'] = master_b1['B1_總法人持股(%)'] - master_b1.get('持股%_1', pd.Series(np.nan, index=master_b1.index)).combine_first(master_b1.get('B1_衰退_法人持股(%)_T1', pd.Series(np.nan, index=master_b1.index)))
+    
+    yesterday_holding = master_b1.get('持股%_1', pd.Series(np.nan, index=master_b1.index)).combine_first(
+        master_b1.get('B1_衰退_法人持股(%)_T1', pd.Series(np.nan, index=master_b1.index))
+    )
+    master_b1['B1_1日△Change'] = np.where(
+        master_b1['B1_總法人持股(%)'].notna() & yesterday_holding.notna() & (yesterday_holding > 0),
+        master_b1['B1_總法人持股(%)'] - yesterday_holding,
+        np.nan
+    )
 
     if 'B1_外資持股(%)' in master_b1.columns:
         master_b1['B1_估內資持股(%)'] = (master_b1['B1_總法人持股(%)'] - master_b1['B1_外資持股(%)']).clip(lower=0)
-        if 'B1_外資持股(%)_T1' in master_b1.columns: master_b1['B1_外資1日△Change'] = master_b1['B1_外資持股(%)'] - master_b1['B1_外資持股(%)_T1']
+        if 'B1_外資持股(%)_T1' in master_b1.columns: 
+            master_b1['B1_外資1日△Change'] = np.where(
+                master_b1['B1_外資持股(%)'].notna() & master_b1['B1_外資持股(%)_T1'].notna() & (master_b1['B1_外資持股(%)_T1'] > 0),
+                master_b1['B1_外資持股(%)'] - master_b1['B1_外資持股(%)_T1'],
+                np.nan
+            )
 
     json_dfs = fetch_github_json_all()
     for d in [5, 20, 60, 120]:
@@ -207,14 +238,20 @@ def process_b1_features(DATA_DIR):
     master_b1.drop(columns=[c for c in cols_drop if c in master_b1.columns], inplace=True)
     return master_b1
 
+
 # ==========================================
-# 模組三：B2/B3 法人佔比與連續買賣運算
+# 模組三：B2/B3 法人佔比與連續買賣運算 (已修正零值偏誤)
 # ==========================================
-def process_b2_category(files, category_name, base_keyword, short_type, is_sell_only=False):
+def process_b2_category(files, category_name, base_keyword, short_type, is_sell_only, target_date):
     if not files: return pd.DataFrame()
     date_files = defaultdict(list)
-    for f in files: date_files[extract_date_from_name(f)].append(f)
+    for f in files: 
+        d = extract_date_from_name(f)
+        if d <= target_date: date_files[d].append(f)
+        
     sorted_dates = sorted(date_files.keys(), reverse=True)[:10] 
+    
+    if not sorted_dates or sorted_dates[0] != target_date: return pd.DataFrame()
     
     base_df = None
     timeframes = ['當日', '2日', '3日', '5日', '10日', '1個月', '3個月', '半年']
@@ -246,19 +283,19 @@ def process_b2_category(files, category_name, base_keyword, short_type, is_sell_
                 base_df = pd.concat([base_df, new_codes], ignore_index=True)
 
     if base_df is None or base_df.empty: return pd.DataFrame()
-    for c in [c for c in base_df.columns if '(%)' in c]: base_df[c] = pd.to_numeric(base_df[c], errors='coerce')
+    for c in [c for c in base_df.columns if '(%)' in c]: base_df[c] = pd.to_numeric(base_df[c], errors='coerce') # 這裡保留NaN，不補0
     
     c_tdy, c_5d = f'B2_{category_name}_當日佔{short_type}(%)', f'B2_{category_name}_5日佔{short_type}(%)'
     def eval_cont(row):
         t, v5 = row.get(c_tdy, np.nan), row.get(c_5d, np.nan)
-        if pd.isna(t) and pd.isna(v5): return "⚪ 榜外無動靜"
+        if pd.isna(t) and pd.isna(v5): return "⚪ 榜外/無資料"
         if is_sell_only:
             if pd.isna(t) and v5 > 0: return "📈 掉出賣榜 (賣壓減輕)"
             if pd.isna(v5) and t > 0: return "⚠️ 突擊賣榜 (警戒賣壓)"
             if t > 0: return "🚨 賣壓加劇" if t > v5 else "📉 賣壓趨緩"
             return "🔄 持平"
         else:
-            if pd.isna(t): return "📉 掉出買榜 (籌碼鬆動)" if v5 > 0 else "📈 掉出賣榜 (賣壓減輕)" if v5 < 0 else "⚪ 榜外無動靜"
+            if pd.isna(t): return "📉 掉出買榜 (籌碼鬆動)" if v5 > 0 else "📈 掉出賣榜 (賣壓減輕)" if v5 < 0 else "⚪ 榜外/無資料"
             if pd.isna(v5): return "🆕 突擊買榜" if t > 0 else "⚠️ 突擊賣榜" if t < 0 else "🔄 持平"
             if t > 0: return "🔥 轉賣為買 (強力反轉)" if v5 < 0 else "🔥 強延續" if t > v5 else "⚠️ 買盤趨緩"
             if t < 0: return "🚨 轉買為賣 (提防倒貨)" if v5 > 0 else "🚨 劇烈倒貨" if abs(t) > abs(v5) else "📉 調節洗盤"
@@ -266,298 +303,16 @@ def process_b2_category(files, category_name, base_keyword, short_type, is_sell_
     base_df[f'B2_{category_name}{short_type}動態'] = base_df.apply(eval_cont, axis=1)
     return base_df
 
-def process_institutional_volume(files):
-    if not files: return pd.DataFrame()
+def process_institutional_volume(files, target_date):
+    valid_files = [f for f in files if extract_date_from_name(f) == target_date]
+    if not valid_files: return pd.DataFrame()
+    
     all_dfs = []
-    for f in files:
+    for f in valid_files:
         try:
             df = pd.read_parquet(f) if f.endswith('.parquet') else pd.read_csv(f, encoding='utf-8-sig')
             df.columns = [str(c).replace(" ", "").replace("\n", "").strip() for c in df.columns]
             id_col = next((c for c in df.columns if '代號' in c), None)
             if id_col:
                 df = df.rename(columns={id_col: 'stock_code'})
-                df['stock_code'] = df['stock_code'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                all_dfs.append(df)
-        except: continue
-    if not all_dfs: return pd.DataFrame()
-    combined = pd.concat(all_dfs, ignore_index=True)
-    date_col = next((c for c in combined.columns if '日期' in c), None)
-    if date_col:
-        combined[date_col] = combined[date_col].astype(str).str.strip()
-        combined = combined[combined[date_col] == combined[date_col].max()]
-        
-    t_cols = {'外資買賣超張數': 'B2_外資買賣超(張)', '投信買賣超張數': 'B2_投信買賣超(張)', '自營買賣超張數': 'B2_自營買賣超(張)', '合計買賣超張數': 'B2_三大法人買賣超(張)'}
-    keep, rename = ['stock_code'], {}
-    for raw, new in t_cols.items():
-        if raw in combined.columns:
-            keep.append(raw); rename[raw] = new
-            combined[raw] = pd.to_numeric(combined[raw], errors='coerce').fillna(0)
-    return combined[keep].rename(columns=rename).copy()
-
-def process_b3_continuous(files):
-    if not files: return pd.DataFrame()
-    f_day = [f for f in files if "日" in os.path.basename(f) and "週" not in os.path.basename(f)]
-    f_week = [f for f in files if "週" in os.path.basename(f) or "wk" in os.path.basename(f).lower()]
-    
-    def proc_sub(sub_files, is_daily):
-        if not sub_files: return pd.DataFrame()
-        latest = sorted([extract_date_from_name(f) for f in sub_files], reverse=True)[0]
-        latest_files = [f for f in sub_files if extract_date_from_name(f) == latest]
-        
-        all_dfs = []
-        for f in latest_files:
-            try:
-                df = pd.read_csv(f, encoding='utf-8-sig')
-                df.columns = [str(c).replace(" ", "").replace("\n", "").strip() for c in df.columns]
-                id_col = next((c for c in df.columns if '代號' in c), df.columns[0])
-                df = df.rename(columns={id_col: 'stock_code'})
-                df['stock_code'] = df['stock_code'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                all_dfs.append(df)
-            except: continue
-        if not all_dfs: return pd.DataFrame()
-        combined = pd.concat(all_dfs, ignore_index=True).drop_duplicates(subset=['stock_code'], keep='first')
-        
-        cols, rename = ['stock_code'], {}
-        for inst in ['外資', '投信', '自營商', '三大法人']:
-            t_col, v_col, pv_col, pi_col = f"{inst}連續買賣{'日' if is_daily else '週'}數", f"{inst}連續買賣張數", f"{inst}連續買賣佔成交(%)", f"{inst}連續買賣佔發行量(%)"
-            if t_col in combined.columns: cols.append(t_col); rename[t_col] = f"B3_{inst}連買{'日' if is_daily else '週'}數"
-            if v_col in combined.columns: cols.append(v_col); rename[v_col] = f"B3_{inst}連買{'日' if is_daily else '週'}張數"
-            if pv_col in combined.columns: cols.append(pv_col); rename[pv_col] = f"B3_{inst}連買{'日' if is_daily else '週'}佔成交(%)"
-            if pi_col in combined.columns: cols.append(pi_col); rename[pi_col] = f"B3_{inst}連買{'日' if is_daily else '週'}佔發行(%)"
-                
-        df_res = combined[cols].rename(columns=rename).copy()
-        
-        for inst in ['外資', '投信', '自營商', '三大法人']:
-            col = f"B3_{inst}連買{'日' if is_daily else '週'}數"
-            if col in df_res.columns:
-                df_res[col] = pd.to_numeric(df_res[col], errors='coerce').fillna(0)
-                for pct in [f"B3_{inst}連買{'日' if is_daily else '週'}佔成交(%)", f"B3_{inst}連買{'日' if is_daily else '週'}佔發行(%)"]:
-                    if pct in df_res.columns: df_res[pct] = pd.to_numeric(df_res[pct], errors='coerce').fillna(0.0)
-                conds = [df_res[col] >= 10, df_res[col] >= 5, df_res[col] > 0, df_res[col] <= -10, df_res[col] <= -5, df_res[col] < 0]
-                choices = ["🔥 波段認養", "⚡ 買盤點火", "🆕 試單觀察", "☠️ 終極棄養", "🩸 賣盤連環", "📉 試單轉賣"] if is_daily else ["👑 長線主控", "🚀 趨勢加溫", "🌱 週線發動", "🕳 長線棄守", "⚠️ 趨勢破底", "🥀 週線轉弱"]
-                df_res[f"B3_{inst}{'日' if is_daily else '週'}連買動態"] = np.select(conds, choices, default="⚪ 無連續動作")
-        return df_res
-
-    df_d, df_w = proc_sub(f_day, True), proc_sub(f_week, False)
-    if not df_d.empty and not df_w.empty: return pd.merge(df_d, df_w, on='stock_code', how='outer')
-    return df_d if not df_d.empty else df_w
-
-def process_b2_b3_features(DATA_DIR):
-    print("▶️ [3/5] 開始處理 B2/B3 法人佔比與連續買賣...")
-    f_21 = glob.glob(os.path.join(DATA_DIR, "*外資買超佔成交比*.csv")) + glob.glob(os.path.join(DATA_DIR, "*外資賣超佔成交比*.csv"))
-    f_22 = glob.glob(os.path.join(DATA_DIR, "*投信買超佔成交比*.csv")) + glob.glob(os.path.join(DATA_DIR, "*投信賣超佔成交比*.csv"))
-    f_23 = glob.glob(os.path.join(DATA_DIR, "*外資買超佔發行張數*.csv")) + glob.glob(os.path.join(DATA_DIR, "*外資賣超佔發行張數*.csv"))
-    f_24 = glob.glob(os.path.join(DATA_DIR, "*投信買超佔發行張數*.csv")) + glob.glob(os.path.join(DATA_DIR, "*投信賣超佔發行張數*.csv"))
-    f_25, f_26 = glob.glob(os.path.join(DATA_DIR, "*外資賣出佔成交比*.csv")), glob.glob(os.path.join(DATA_DIR, "*投信賣出佔成交比*.csv"))
-    f_27 = glob.glob(os.path.join(DATA_DIR, "*三大法人買超佔成交比*.csv")) + glob.glob(os.path.join(DATA_DIR, "*三大法人賣超佔成交比*.csv"))
-    f_vol = glob.glob(os.path.join(DATA_DIR, "*三大法人累計買超*.parquet")) + glob.glob(os.path.join(DATA_DIR, "*三大法人累計買超*.csv"))
-    f_b3 = glob.glob(os.path.join(DATA_DIR, "*連續買*.csv"))
-    
-    dfs = [
-        process_b2_category(f_21, "外資", "買賣超佔成交", "成交", False),
-        process_b2_category(f_22, "投信", "買賣超佔成交", "成交", False),
-        process_b2_category(f_23, "外資", "買賣超佔發行", "發行", False),
-        process_b2_category(f_24, "投信", "買賣超佔發行", "發行", False),
-        process_b2_category(f_25, "外資賣出", "賣出佔成交", "成交", True),
-        process_b2_category(f_26, "投信賣出", "賣出佔成交", "成交", True),
-        process_b2_category(f_27, "三大法人", "買賣超佔成交", "成交", False),
-        process_institutional_volume(f_vol),
-        process_b3_continuous(f_b3)
-    ]
-    dfs = [d for d in dfs if not d.empty]
-    if not dfs: return None
-    
-    master_b23 = dfs[0]
-    for d in dfs[1:]: master_b23 = pd.merge(master_b23, d, on='stock_code', how='outer')
-    
-    master_b23 = master_b23.fillna({c: "⚪ 榜外/無資料" for c in master_b23.columns if '動態' in c})
-    master_b23 = master_b23.fillna({c: 0.0 for c in master_b23.columns if '連買' in c and ('數' in c or '佔' in c)})
-    return master_b23
-
-# ==========================================
-# 模組四：B4 資券多空淨值特徵 (融資、借券、融券)
-# ==========================================
-def process_b4_dynamic_category(files, category_name, val_indicator, unit_suffix):
-    if not files: return pd.DataFrame()
-    date_files = defaultdict(list)
-    for f in files: date_files[extract_date_from_name(f)].append(f)
-    sorted_dates = sorted(date_files.keys(), reverse=True)[:10] 
-    
-    base_df = None
-    timeframes = ['當日', '2日', '3日', '5日', '10日', '1個月', '3個月', '半年']
-    
-    for idx, d in enumerate(sorted_dates):
-        daily_dfs = []
-        for f in date_files[d]:
-            try:
-                df = pd.read_csv(f, encoding='utf-8-sig')
-                df.columns = [str(c).replace(" ", "").replace("\n", "").strip() for c in df.columns]
-                id_col = next((c for c in df.columns if '代號' in c), df.columns[0])
-                df = df.rename(columns={id_col: 'stock_code'})
-                df['stock_code'] = df['stock_code'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                daily_dfs.append(df)
-            except: continue
-            
-        if not daily_dfs: continue
-        df_combined = pd.concat(daily_dfs, ignore_index=True).drop_duplicates(subset=['stock_code'], keep='first')
-        
-        col_mapping = {next((c for c in df_combined.columns if tf in c and val_indicator in c), None): f'B4_{category_name}_{tf}增減{unit_suffix}' for tf in timeframes}
-        col_mapping = {k: v for k, v in col_mapping.items() if k}
-        
-        if idx == 0:
-            cols_to_keep = ['stock_code'] + [c for c in col_mapping.keys() if c in df_combined.columns]
-            base_df = df_combined[cols_to_keep].rename(columns=col_mapping).copy()
-        else:
-            if base_df is not None:
-                new_codes = df_combined[~df_combined['stock_code'].isin(base_df['stock_code'])][['stock_code']].copy()
-                for new_col in col_mapping.values(): new_codes[new_col] = np.nan
-                base_df = pd.concat([base_df, new_codes], ignore_index=True)
-
-    if base_df is None or base_df.empty: return pd.DataFrame()
-    
-    for c in [c for c in base_df.columns if '增減' in c]:
-        base_df[c] = pd.to_numeric(base_df[c].astype(str).str.replace(',', '', regex=False).str.replace('%', '', regex=False), errors='coerce')
-        
-    return base_df
-
-def process_b4_features(DATA_DIR):
-    print("▶️ [4/5] 開始處理 B4 信用交易資券籌碼...")
-    f_margin_v = glob.glob(os.path.join(DATA_DIR, "*融資*張數*.csv"))
-    f_margin_p = glob.glob(os.path.join(DATA_DIR, "*融資*幅度*.csv"))
-    f_sbl_v = glob.glob(os.path.join(DATA_DIR, "*借券賣出*張數*.csv"))
-    f_sbl_a = glob.glob(os.path.join(DATA_DIR, "*借券賣出*金額*.csv"))
-    f_sbl_p = glob.glob(os.path.join(DATA_DIR, "*借券賣出*幅度*.csv"))
-    f_short_v = glob.glob(os.path.join(DATA_DIR, "*融券*張數*.csv"))
-    f_short_p = glob.glob(os.path.join(DATA_DIR, "*融券*幅度*.csv"))
-    
-    df_mg_v = process_b4_dynamic_category(f_margin_v, "融資", "張數", "(張)")
-    df_mg_p = process_b4_dynamic_category(f_margin_p, "融資", "%", "(%)")
-    df_sbl_v = process_b4_dynamic_category(f_sbl_v, "借券賣出", "張數", "(張)")
-    df_sbl_a = process_b4_dynamic_category(f_sbl_a, "借券賣出", "萬元", "(萬)")
-    df_sbl_p = process_b4_dynamic_category(f_sbl_p, "借券賣出", "%", "(%)")
-    df_sh_v = process_b4_dynamic_category(f_short_v, "融券", "張數", "(張)")
-    df_sh_p = process_b4_dynamic_category(f_short_p, "融券", "%", "(%)")
-    
-    dfs = [df for df in [df_mg_v, df_mg_p, df_sbl_v, df_sbl_a, df_sbl_p, df_sh_v, df_sh_p] if not df.empty]
-    if not dfs: return None
-        
-    master_b4 = dfs[0]
-    for df in dfs[1:]: master_b4 = pd.merge(master_b4, df, on='stock_code', how='outer')
-        
-    def get_margin_tag(row):
-        v_tdy, v_5d, p_5d = row.get('B4_融資_當日增減(張)', np.nan), row.get('B4_融資_5日增減(張)', np.nan), row.get('B4_融資_5日增減(%)', np.nan)
-        if pd.isna(v_tdy) and pd.isna(v_5d): return "⚪ 榜外無動靜"
-        if v_tdy > 0: return "📈 散戶大舉進場" if v_tdy > 1000 or (not pd.isna(p_5d) and p_5d > 5) else "⚠️ 融資漸增"
-        if v_tdy < 0: return "📉 浮額大洗盤" if v_tdy < -1000 or (not pd.isna(p_5d) and p_5d < -5) else "🛡️ 融資收斂"
-        if v_5d > 0: return "⚠️ 融資累積中"
-        if v_5d < 0: return "🛡️ 籌碼沉澱"
-        return "🔄 持平"
-
-    def get_sbl_tag(row):
-        v_tdy, a_5d, p_5d = row.get('B4_借券賣出_當日增減(張)', np.nan), row.get('B4_借券賣出_5日增減(萬)', np.nan), row.get('B4_借券賣出_5日增減(%)', np.nan)
-        if pd.isna(v_tdy) and pd.isna(a_5d): return "⚪ 空單休兵"
-        if v_tdy > 0: return "⚠️ 空軍大舉佈局" if (not pd.isna(a_5d) and a_5d > 5000) or (not pd.isna(p_5d) and p_5d > 10) else "🚨 借券漸增"
-        if v_tdy < 0: return "💥 巨量借券回補" if (not pd.isna(a_5d) and a_5d < -5000) or (not pd.isna(p_5d) and p_5d < -10) else "🔥 緩步回補"
-        if a_5d > 0: return "🚨 外資潛伏空單"
-        if a_5d < 0: return "🔥 波段回補中"
-        return "🔄 持平"
-
-    def get_short_tag(row):
-        v_tdy, v_5d, p_5d = row.get('B4_融券_當日增減(張)', np.nan), row.get('B4_融券_5日增減(張)', np.nan), row.get('B4_融券_5日增減(%)', np.nan)
-        if pd.isna(v_tdy) and pd.isna(v_5d): return "⚪ 空軍休兵"
-        if v_tdy > 0: return "⚠️ 散戶大舉放空" if v_5d > 1000 or (not pd.isna(p_5d) and p_5d > 20) else "🚨 融券漸增"
-        if v_tdy < 0: return "💥 融券斷頭回補" if v_5d < -1000 or (not pd.isna(p_5d) and p_5d < -20) else "🔥 融券退場"
-        if v_5d > 0: return "🚨 融券累積中"
-        if v_5d < 0: return "🔥 波段回補中"
-        return "🔄 持平"
-
-    master_b4['B4_融資動態'] = master_b4.apply(get_margin_tag, axis=1)
-    master_b4['B4_借券賣出動態'] = master_b4.apply(get_sbl_tag, axis=1)
-    master_b4['B4_融券動態'] = master_b4.apply(get_short_tag, axis=1)
-    
-    master_b4['B4_軋空_融資大減'] = (master_b4.get('B4_融資_5日增減(張)', 0) <= -1000).map({True: '✔️', False: ''})
-    master_b4['B4_軋空_借券回補'] = (master_b4.get('B4_借券賣出_5日增減(萬)', 0) <= -1000).map({True: '✔️', False: ''})
-    master_b4['B4_軋空_融券大增'] = (master_b4.get('B4_融券_5日增減(張)', 0) >= 500).map({True: '✔️', False: ''})
-    master_b4['B4_套牢_融資大增'] = (master_b4.get('B4_融資_5日增減(張)', 0) >= 1000).map({True: '✔️', False: ''})
-    master_b4['B4_套牢_借券大增'] = (master_b4.get('B4_借券賣出_5日增減(萬)', 0) >= 1000).map({True: '✔️', False: ''})
-
-    return master_b4
-
-
-# ==========================================
-# 模組五：大一統合併與終極精算 (包含反碎片化與重排序)
-# ==========================================
-def run_master_pipeline():
-    DATA_DIR, OUTPUT_DIR = "./data", "./data_cache"
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    
-    df_b0, date_prefix = process_b0_features(DATA_DIR, OUTPUT_DIR)
-    df_b1 = process_b1_features(DATA_DIR)
-    df_b23 = process_b2_b3_features(DATA_DIR)
-    df_b4 = process_b4_features(DATA_DIR)
-    
-    if df_b0 is None:
-        return print("❌ 缺少 B0 基礎檔案，合併失敗。")
-        
-    print("▶️️ [5/5] 執行 B0+B1+B2+B3+B4 大一統合併與防呆淨化...")
-    
-    drop_targets = ['股票代號', '股票名稱', '證券代號', '證券名稱', '名稱', '日期', '排名']
-    for df in [df_b0, df_b1, df_b23, df_b4]:
-        if df is not None:
-            df.drop(columns=[c for c in drop_targets if c in df.columns], inplace=True, errors='ignore')
-
-    # === 合併主體 ===
-    df_master = df_b0.copy()
-    if df_b1 is not None: df_master = pd.merge(df_master, df_b1, on='stock_code', how='left')
-    if df_b23 is not None: df_master = pd.merge(df_master, df_b23, on='stock_code', how='left')
-    if df_b4 is not None: df_master = pd.merge(df_master, df_b4, on='stock_code', how='left')
-    
-    cols_to_drop = [c for c in df_master.columns if c.endswith('_x') or c.endswith('_y')]
-    if cols_to_drop: df_master.drop(columns=cols_to_drop, inplace=True)
-    
-    vol_mapping = {
-        'B1_外資買賣超張數': 'B2_外資買賣超(張)',
-        'B1_投信買賣超張數': 'B2_投信買賣超(張)',
-        'B1_自營買賣超張數': 'B2_自營買賣超(張)',
-        'B1_合計買賣超張數': 'B2_三大法人買賣超(張)'
-    }
-    for b1_col, b2_col in vol_mapping.items():
-        if b1_col in df_master.columns and b2_col in df_master.columns:
-            df_master[b1_col] = df_master[b1_col].combine_first(df_master[b2_col])
-            df_master.drop(columns=[b2_col], inplace=True)
-        elif b2_col in df_master.columns:
-            df_master.rename(columns={b2_col: b1_col}, inplace=True)
-
-    # 🛡️ 解決 pandas 效能警告 (Highly fragmented)
-    df_master = df_master.copy()
-
-    # === 🚀 最精準的法人金額計算 (單位：萬) ===
-    if 'B1_合計買賣超張數' in df_master.columns and '成交' in df_master.columns:
-        df_master['B1_1日法人金額(萬)'] = (df_master['B1_合計買賣超張數'] * df_master['成交']) / 10
-        
-    if '估算總發行張數' in df_master.columns:
-        for d in [5, 20, 60, 120]:
-            if f'B1_{d}日△Change' in df_master.columns and f'{d}日均價' in df_master.columns:
-                df_master[f'B1_{d}日法人金額(萬)'] = (df_master['估算總發行張數'] * (df_master[f'B1_{d}日△Change'] / 100) * df_master[f'{d}日均價']) / 10
-
-    # 🧩 欄位智慧重排 (B0 -> B1 -> B2 -> B3 -> B4)
-    base_and_b0 = [c for c in df_master.columns if not re.match(r'^B[1234]_', c)]
-    b1_cols = [c for c in df_master.columns if c.startswith('B1_')]
-    b2_cols = [c for c in df_master.columns if c.startswith('B2_')]
-    b3_cols = [c for c in df_master.columns if c.startswith('B3_')]
-    b4_cols = [c for c in df_master.columns if c.startswith('B4_')]
-    
-    ordered_cols = base_and_b0 + b1_cols + b2_cols + b3_cols + b4_cols
-    missing_cols = [c for c in df_master.columns if c not in ordered_cols]
-    df_master = df_master[ordered_cols + missing_cols]
-
-    out_parquet, out_csv = f"{OUTPUT_DIR}/{date_prefix}_master_features.parquet", f"{OUTPUT_DIR}/{date_prefix}_master_features.csv"
-    df_master.to_parquet(out_parquet, index=False)
-    df_master.to_csv(out_csv, index=False, encoding='utf-8-sig')
-    
-    print(f"\n🎉 完美大一統 B0~B4 ETL 執行完畢！")
-    print(f"📊 總計產生 {len(df_master)} 筆股票資料，已橫跨基礎量價、籌碼軌跡、連續動能與資券軋空等多維度。")
-    print(f"📁 檔案已存至：\n  - {out_parquet}\n  - {out_csv}")
-
-if __name__ == "__main__":
-    run_master_pipeline()
+                df['stock_code'] = df['stock_code'].astype(str).
