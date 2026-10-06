@@ -1,4 +1,4 @@
-# master_etl_pipeline.py (B0-B4 完全體版 - 修復日期對齊 Bug)
+# master_etl_pipeline.py (B0-B7 完全體版 - 修復日期對齊 Bug)
 import pandas as pd
 import numpy as np
 import os
