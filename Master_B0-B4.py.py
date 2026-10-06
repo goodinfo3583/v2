@@ -730,13 +730,16 @@ def run_master_pipeline():
     df_b23 = process_b2_b3_features(DATA_DIR, target_date)
     df_b4 = process_b4_features(DATA_DIR, target_date)
     df_b6 = process_b6_features(DATA_DIR, target_date)
-    df_b7 = process_b7_features(DATA_DIR)
     
+    # 👇 新增這行 👇 注意，B7是月更資料，不需要傳入嚴格的 target_date，它會自己抓取資料夾內最新的月份來算
+    df_b7 = process_b7_features(DATA_DIR) 
+
     print("▶️ [5/5] 執行 B0+B1+B2+B3+B4 大一統合併與防呆淨化...")
     
     drop_targets = ['股票代號', '股票名稱', '證券代號', '證券名稱', '名稱', '日期', '排名']
-    # 👇 陣列裡補上 df_b6 👇
-    for df in [df_b0, df_b1, df_b23, df_b4, df_b6]:
+    
+    # 👇 陣列裡補上 df_b7 👇
+    for df in [df_b0, df_b1, df_b23, df_b4, df_b6, df_b7]:
         if df is not None:
             df.drop(columns=[c for c in drop_targets if c in df.columns], inplace=True, errors='ignore')
 
@@ -745,9 +748,9 @@ def run_master_pipeline():
     if df_b1 is not None: df_master = pd.merge(df_master, df_b1, on='stock_code', how='left')
     if df_b23 is not None: df_master = pd.merge(df_master, df_b23, on='stock_code', how='left')
     if df_b4 is not None: df_master = pd.merge(df_master, df_b4, on='stock_code', how='left')
-    # 👇 新增這行 👇
-    if df_b6 is not None: df_master = pd.merge(df_master, df_b6, on='stock_code', how='left')   
-    cols_to_drop = [c for c in df_master.columns if c.endswith('_x') or c.endswith('_y')]
+    if df_b6 is not None: df_master = pd.merge(df_master, df_b6, on='stock_code', how='left')
+    if df_b7 is not None: df_master = pd.merge(df_master, df_b7, on='stock_code', how='left')    cols_to_drop = [c for c in df_master.columns if c.endswith('_x') or c.endswith('_y')]
+
     if cols_to_drop: df_master.drop(columns=cols_to_drop, inplace=True)
     
     vol_mapping = {
