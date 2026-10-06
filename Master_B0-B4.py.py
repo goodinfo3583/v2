@@ -749,8 +749,9 @@ def run_master_pipeline():
     if df_b23 is not None: df_master = pd.merge(df_master, df_b23, on='stock_code', how='left')
     if df_b4 is not None: df_master = pd.merge(df_master, df_b4, on='stock_code', how='left')
     if df_b6 is not None: df_master = pd.merge(df_master, df_b6, on='stock_code', how='left')
-    if df_b7 is not None: df_master = pd.merge(df_master, df_b7, on='stock_code', how='left')    cols_to_drop = [c for c in df_master.columns if c.endswith('_x') or c.endswith('_y')]
+    if df_b7 is not None: df_master = pd.merge(df_master, df_b7, on='stock_code', how='left')
 
+    cols_to_drop = [c for c in df_master.columns if c.endswith('_x') or c.endswith('_y')]
     if cols_to_drop: df_master.drop(columns=cols_to_drop, inplace=True)
     
     vol_mapping = {
