@@ -115,7 +115,8 @@ def fmt_int(val):
 
 # 🌟 4. 個股儀表板 Fragment
 @st.fragment
-def render_broker_dashboard(display_name, stock_raw, df_trend):
+# ✅ 修正 1：把 target_stock 補回參數列表
+def render_broker_dashboard(target_stock, display_name, stock_raw, df_trend):
     # stock_raw 已經是乾淨的單股資料，直接使用
     latest_data = df_trend.iloc[-1]
     st.metric(label=f"{latest_data['trade_date']} 最新券商分點集中度", value=f"{latest_data['concentration_%']}%", delta=f"主力淨買超 {latest_data['net_buy']:,} 張")   
@@ -138,13 +139,11 @@ def render_broker_dashboard(display_name, stock_raw, df_trend):
         fig_trend.add_trace(go.Scatter(x=df_trend_plot['trade_date'], y=df_trend_plot['20日集中度(%)'], mode='lines', line=dict(color='#FF00FF', width=1.5, dash='dash'), name='20日集中度'), secondary_y=True)
     
     if 'stock_price' in df_trend_plot.columns:
-        fig_trend.add_trace(go.Scatter(x=df_trend_plot['trade_date'], y=df_trend_plot['stock_price'], mode='lines+markers', line=dict(color='#38bdf8', width=2), name='市場均價(股價)'), secondary_y=False)
-    
-    stock_raw = df_raw_all[df_raw_all['stock_code'] == target_stock].copy()
+        fig_trend.add_trace(go.Scatter(x=df_trend_plot['trade_date'], y=df_trend_plot['stock_price'], mode='lines+markers', line=dict(color='#38bdf8', width=2), name='市場均價(股價)'), secondary_y=False)   
+    #stock_raw = df_raw_all[df_raw_all['stock_code'] == target_stock].copy()
     broker_col = next((c for c in ['broker_name', 'broker', '券商名稱', '券商', 'name'] if c in stock_raw.columns), None)
     if not stock_raw.empty and broker_col:
-        recent_20_dates = sorted(stock_raw['trade_date'].unique(), reverse=True)[:20]
-        recent_20_raw = stock_raw[stock_raw['trade_date'].isin(recent_20_dates)]
+        recent_20_dates = sorted(stock_raw['trade_date'].unique(), reverse=True)[:20]       recent_20_raw = stock_raw[stock_raw['trade_date'].isin(recent_20_dates)]
         top_broker_agg = recent_20_raw.groupby(broker_col).agg(
             淨買張數=('net_vol', 'sum'), 
             總買進金額=('總買進金額', 'sum'), 
@@ -567,8 +566,8 @@ def render(STOCK_DICT=None):
             
             if not stock_raw.empty and not df_trend.empty:
                 try: 
-                    # 傳入已過濾好的 stock_raw
-                    render_broker_dashboard(display_name, stock_raw, df_trend)
+                    # ✅ 修正 3：這裡也要記得把 target_stock 傳進去
+                    render_broker_dashboard(target_stock, display_name, stock_raw, df_trend)
                 except Exception as e:
                     st.error(f"❌ 在渲染圖表時發生程式錯誤：\n\n {e}")
             else: 
