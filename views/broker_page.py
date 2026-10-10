@@ -143,7 +143,8 @@ def render_broker_dashboard(target_stock, display_name, stock_raw, df_trend):
     #stock_raw = df_raw_all[df_raw_all['stock_code'] == target_stock].copy()
     broker_col = next((c for c in ['broker_name', 'broker', '券商名稱', '券商', 'name'] if c in stock_raw.columns), None)
     if not stock_raw.empty and broker_col:
-        recent_20_dates = sorted(stock_raw['trade_date'].unique(), reverse=True)[:20]       recent_20_raw = stock_raw[stock_raw['trade_date'].isin(recent_20_dates)]
+        recent_20_dates = sorted(stock_raw['trade_date'].unique(), reverse=True)[:20]
+        recent_20_raw = stock_raw[stock_raw['trade_date'].isin(recent_20_dates)]
         top_broker_agg = recent_20_raw.groupby(broker_col).agg(
             淨買張數=('net_vol', 'sum'), 
             總買進金額=('總買進金額', 'sum'), 
