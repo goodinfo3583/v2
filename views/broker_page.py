@@ -4,6 +4,7 @@ import pandas as pd
 import requests
 import urllib.parse
 import numpy as np
+import duckdb
 
 # ==========================================
 # ⚙️ 基礎設定與快取讀取引擎
@@ -30,16 +31,30 @@ def fetch_text_from_hf(file_name):
         pass
     return "6"
 
-# 🌟 1. 滿血版 Parquet 讀取引擎 (保留給個股明細與倒貨矩陣使用)
+# ==========================================
+# 🚀 取代原本的滿血版全表讀取，改為「遠端精準查詢」
+# ==========================================
 @st.cache_data(show_spinner=False, ttl=3600)
-def load_full_blood_broker_history():
+def get_single_stock_broker(stock_code):
+    """只從遠端 Parquet 拉取單一股票的明細，避免記憶體崩潰"""
     url = f"{HF_BASE_URL}/{urllib.parse.quote('broker_summary_master.parquet')}"
     try:
-        df = pd.read_parquet(url)
-    except Exception:
-        return pd.DataFrame()
+        # 建立連線並載入 httpfs 擴充套件以支援遠端讀取
+        conn = duckdb.connect()
+        conn.execute("INSTALL httpfs;")
+        conn.execute("LOAD httpfs;")
+        
+        # 僅提取目標股票的資料 (大幅節省 RAM)
+        query = f"""
+            SELECT * FROM read_parquet('{url}') 
+            WHERE "股票代號" = '{stock_code}'
+        """
+        df = conn.query(query).df()
+        
+        if df.empty:
+            return pd.DataFrame()
 
-    if not df.empty:
+        # 延續您原本的格式清理邏輯
         df = df.rename(columns={
             '日期': 'trade_date', 
             '股票代號': 'stock_code', 
@@ -47,7 +62,6 @@ def load_full_blood_broker_history():
             '券商代號': 'broker', 
             '買賣超股數': 'net_vol_shares'
         })
-        
         df['stock_code'] = df['stock_code'].astype(str).astype('category')
         df['broker'] = df['broker'].astype(str).astype('category')
         df['broker_name'] = df['broker_name'].astype(str).astype('category')
@@ -67,9 +81,9 @@ def load_full_blood_broker_history():
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], downcast='float').astype('float32')
         
-        df = df.drop(columns=['net_vol_shares'], errors='ignore')
-
-    return df
+        return df.drop(columns=['net_vol_shares'], errors='ignore')
+    except Exception as e:
+        return pd.DataFrame()
 
 # 🌟 2. 趨勢大表讀取引擎 (🚀 直接讀取後端算好的成果，零計算負擔！)
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -101,10 +115,11 @@ def fmt_int(val):
 
 # 🌟 4. 個股儀表板 Fragment
 @st.fragment
-def render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend):
+def render_broker_dashboard(display_name, stock_raw, df_trend):
+    # stock_raw 已經是乾淨的單股資料，直接使用
     latest_data = df_trend.iloc[-1]
-    st.metric(label=f"{latest_data['trade_date']} 最新券商分點集中度", value=f"{latest_data['concentration_%']}%", delta=f"主力淨買超 {latest_data['net_buy']:,} 張")
-    
+    st.metric(label=f"{latest_data['trade_date']} 最新券商分點集中度", value=f"{latest_data['concentration_%']}%", delta=f"主力淨買超 {latest_data['net_buy']:,} 張")   
+
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
     st.subheader(f"📊 {display_name} 籌碼與股價共振走勢")
@@ -383,15 +398,16 @@ def render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend):
         else: st.write("無足夠資料產出")
 
 # ==========================================
-# 🖼️ 主渲染入口
+# 🖼️ 主渲染入口更新
 # ==========================================
 def render(STOCK_DICT=None):
-    df_raw_all = load_full_blood_broker_history()
+    # ❌ 刪除原本的：df_raw_all = load_full_blood_broker_history()
     df_trends_all = load_stock_trends()
     
+    # ✅ 改從輕量的 df_trends_all 提取最新日期
     latest_date = "讀取中..."
-    if not df_raw_all.empty and 'trade_date' in df_raw_all.columns:
-        latest_date = pd.Series(df_raw_all['trade_date'].unique()).dropna().astype(str).max()
+    if not df_trends_all.empty and 'trade_date' in df_trends_all.columns:
+        latest_date = pd.Series(df_trends_all['trade_date'].unique()).dropna().astype(str).max()
 
     st.markdown(f"""券商動向基準日：{latest_date}""", unsafe_allow_html=True)
     st.markdown("### 🌍 全市場連買分點快搜")
@@ -526,10 +542,8 @@ def render(STOCK_DICT=None):
             tab_idx += 1
     else:
         st.info("動能資料載入中或後台尚未產出今日資料。")
-
+    # 個股查詢
     st.markdown("---")
-
-    # 🌟 3. 個股查詢器 🌟
     st.markdown("### 🔍 個股查詢與走勢圖")
     stock_options = []
     if STOCK_DICT:
@@ -544,16 +558,20 @@ def render(STOCK_DICT=None):
         target_stock = selected_stock_str.split(" ")[0].strip()
         display_name = selected_stock_str
         
-        if not df_raw_all.empty and not df_trends_all.empty:
-            stock_raw = df_raw_all[df_raw_all['stock_code'].astype(str) == target_stock].copy()
+        # ✅ 使用者觸發搜尋後，才向遠端精準要這檔股票的明細
+        with st.spinner(f"📡 正在從資料庫撈取 {display_name} 的券商明細..."):
+            stock_raw = get_single_stock_broker(target_stock)
+            
+        if not df_trends_all.empty:
             df_trend = df_trends_all[df_trends_all['stock_code'].astype(str) == target_stock].copy()
             
             if not stock_raw.empty and not df_trend.empty:
                 try: 
-                    render_broker_dashboard(target_stock, display_name, df_raw_all, df_trend)
+                    # 傳入已過濾好的 stock_raw
+                    render_broker_dashboard(display_name, stock_raw, df_trend)
                 except Exception as e:
                     st.error(f"❌ 在渲染圖表時發生程式錯誤：\n\n {e}")
             else: 
                 st.warning(f"⚠️ 資料庫中找不到 {display_name} 的交易紀錄或趨勢資料。")
         else:
-            st.warning("⚠️ 資料庫載入中或後台尚未產出最新資料。")
+            st.warning("⚠️ 趨勢資料庫載入失敗。")
