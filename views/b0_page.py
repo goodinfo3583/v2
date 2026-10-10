@@ -7,7 +7,7 @@ import glob
 import re
 
 # ==========================================
-# 💡 效能救星 1：極輕量化讀取 (加入中英欄位自動映射)
+# 💡 效能救星 1：極輕量化讀取與智能欄位映射
 # ==========================================
 @st.cache_data(show_spinner=False, ttl=300)
 def get_cached_b0_data(DATA_DIR):
@@ -18,49 +18,77 @@ def get_cached_b0_data(DATA_DIR):
         
     if not files: return None, None
         
-    # 取最新的檔案來讀取 (glob 只讀檔名，不耗記憶體)
-    latest_file = max(files, key=os.path.getmtime)
+    # 依照修改時間排序 (最新在最前面)
+    files = sorted(files, key=os.path.getmtime, reverse=True)
+    latest_file = files[0]
     
     try:
-        combined_df = pd.read_parquet(latest_file)
-    except Exception:
+        # 1. 完整讀取最新一天的資料作為今日看板
+        df_today = pd.read_parquet(latest_file)
+        
+        # 🚀 關鍵修復：將後台的英文與帶單位欄位，自動映射為前台 UI 所需的名稱
+        rename_map = {
+            'trade_date': '標準日期',
+            'stock_code': '統一代號',
+            'stock_name': '股票名稱',
+            '今日成交額(萬)': '成交額(萬)',
+            '成交金額日變化率(%)': '成交金額日變化率'
+        }
+        for p in [5, 10, 20, 30, 45, 60, 120]:
+            rename_map[f'{p}日均額(萬)'] = f'{p}日均額'
+            rename_map[f'較{p}日均額增加(萬)'] = f'較{p}日均額增加'
+            rename_map[f'{p}日均量(張)'] = f'{p}日均量'
+            
+        df_today = df_today.rename(columns=rename_map)
+
+        # 清理欄位名稱格式與代號
+        df_today.columns = [re.sub(r'\s+', '', str(c)) for c in df_today.columns]
+        df_today = df_today.loc[:, ~df_today.columns.duplicated()]
+
+        if '統一代號' in df_today.columns: 
+            df_today['統一代號'] = df_today['統一代號'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+            
+        if '標準日期' in df_today.columns:
+            df_today['標準日期'] = df_today['標準日期'].astype(str).str.strip()
+            df_today = df_today[~df_today['標準日期'].str.lower().isin(['nan', 'nat', 'none', ''])]
+            
+        unique_dates = sorted([str(d) for d in df_today['標準日期'].unique()], reverse=True) if '標準日期' in df_today.columns else []
+        if unique_dates:
+            df_today['股價日期'] = unique_dates[0]
+
+        # 2. 💡 記憶體魔法：只抽取歷史檔案中的 3 個欄位來還原歷史盤面
+        hist_dfs = []
+        for f in files[:20]: # 追溯最近 20 個交易日
+            try:
+                schema = pd.read_parquet(f, columns=[]).columns
+                use_cols = []
+                if 'stock_code' in schema: use_cols.append('stock_code')
+                elif '統一代號' in schema: use_cols.append('統一代號')
+                
+                if 'trade_date' in schema: use_cols.append('trade_date')
+                elif '標準日期' in schema: use_cols.append('標準日期')
+                
+                if '漲跌幅' in schema: use_cols.append('漲跌幅')
+                
+                # 只有當含有代號、日期與漲跌幅時才讀取
+                if len(use_cols) >= 2:
+                    temp_df = pd.read_parquet(f, columns=use_cols)
+                    temp_df = temp_df.rename(columns={'stock_code': '統一代號', 'trade_date': '標準日期'})
+                    hist_dfs.append(temp_df)
+            except Exception:
+                continue
+                
+        if hist_dfs:
+            df_history = pd.concat(hist_dfs, ignore_index=True)
+            df_history['統一代號'] = df_history['統一代號'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+            df_history['標準日期'] = df_history['標準日期'].astype(str).str.strip()
+        else:
+            df_history = df_today[['統一代號', '標準日期', '漲跌幅']] if '漲跌幅' in df_today.columns else pd.DataFrame()
+
+        return df_today, df_history
+        
+    except Exception as e:
         return None, None
-        
-    if combined_df is None or combined_df.empty: return None, None
-
-    # 🚀 關鍵修復：將後台的英文欄位名稱映射為前台 UI 所需的中文名稱
-    rename_map = {
-        'trade_date': '標準日期',
-        'stock_code': '統一代號',
-        'stock_name': '股票名稱'
-    }
-    combined_df = combined_df.rename(columns=rename_map)
-
-    # 清理欄位名稱格式
-    combined_df.columns = [re.sub(r'\s+', '', str(c)) for c in combined_df.columns]
-    combined_df = combined_df.loc[:, ~combined_df.columns.duplicated()]
-
-    # 基本代號與日期標準化
-    if '統一代號' in combined_df.columns: 
-        combined_df['統一代號'] = combined_df['統一代號'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-        
-    # 防呆機制：確保標準日期存在
-    if '標準日期' not in combined_df.columns:
-        return None, None
-        
-    combined_df['標準日期'] = combined_df['標準日期'].astype(str).str.strip()
-    combined_df = combined_df[~combined_df['標準日期'].str.lower().isin(['nan', 'nat', 'none', ''])]
-
-    # 取得最新日期的資料作為 df_today
-    unique_dates = sorted([str(d) for d in combined_df['標準日期'].unique()], reverse=True)
-    if not unique_dates: return None, None
-    latest_date = unique_dates[0]
-    
-    df_today = combined_df[combined_df['標準日期'] == latest_date].copy()
-    if '股價日期' not in df_today.columns:
-        df_today['股價日期'] = latest_date
-    
-    return df_today, combined_df
 
 def sync_b0_data(DATA_DIR):
     if (res := get_cached_b0_data(DATA_DIR)) is not None and res[0] is not None: 
@@ -73,7 +101,6 @@ def sync_b0_data(DATA_DIR):
 def render_b0_interactive_dashboard(df_b0, df_history):
     top_container = st.container()
 
-    # 確保不會因為後台欄位不存在而報錯
     has_status = 'B0_量價狀態' in df_b0.columns
     has_special = 'B0_特殊型態' in df_b0.columns
 
@@ -137,7 +164,8 @@ def render_b0_interactive_dashboard(df_b0, df_history):
         if 'bh' in locals() and not bh.empty:
             st.markdown("##### 📅 歷史盤面變化")
             bt = bh.rename(columns={'up':'漲家數','dn':'跌家數','fl':'平盤數','lu':'漲停數','ld':'跌停數'}).set_index('標準日期').T
-            bt.columns = [str(c)[-4:] for c in bt.columns]
+            # 🚀 修復日期顯示問題 (10/08 變 0/08)，改為取後 5 碼
+            bt.columns = [str(c)[-5:] if len(str(c)) >= 5 else str(c) for c in bt.columns]
             st.dataframe(bt, use_container_width=True)
 
         st.markdown("---")
@@ -146,56 +174,59 @@ def render_b0_interactive_dashboard(df_b0, df_history):
 
     with tab_basic:
         st.markdown(f"**共找到 {len(f_df)} 檔符合條件的標的**")
-        basic_cols = [c for c in ['統一代號', '股票名稱', '成交', '漲跌幅', '成交張數', '成交額(百萬)', '成交金額日變化率', 'PER', '5日均量', '5日均額', 'B0_量價狀態', 'B0_特殊型態'] if c in f_df.columns]
+        # 改為顯示 成交額(萬)
+        basic_cols = [c for c in ['統一代號', '股票名稱', '成交', '漲跌幅', '成交張數', '成交額(萬)', '成交金額日變化率', 'PER', '5日均量', '5日均額', 'B0_量價狀態', 'B0_特殊型態'] if c in f_df.columns]
         st.dataframe(f_df[basic_cols],
             use_container_width=True, hide_index=True, height=500, column_config={
                 "統一代號": st.column_config.TextColumn("代號"), "股票名稱": st.column_config.TextColumn("名稱"),
                 "成交金額日變化率": st.column_config.NumberColumn("日變化率(%)", format="%+.1f %%"),
                 "B0_量價狀態": st.column_config.TextColumn("量價主力照妖鏡", width="large"), "B0_特殊型態": st.column_config.TextColumn("特殊型態雷達", width="medium"),
-                **{k: st.column_config.NumberColumn(n, format=f) for k, n, f in [("成交","成交價","%.2f"), ("漲跌幅","漲跌幅(%)","%.2f"), ("成交張數","今日成交(張)","%d"), ("5日均量","5日均量(張)","%d"), ("成交額(百萬)","成交額(百萬)","%.2f"), ("5日均額","5日均成交額(百萬)","%.2f"), ("PER","本益比","%.2f")]}
+                **{k: st.column_config.NumberColumn(n, format=f) for k, n, f in [("成交","成交價","%.2f"), ("漲跌幅","漲跌幅(%)","%.2f"), ("成交張數","今日成交(張)","%d"), ("5日均量","5日均量(張)","%d"), ("成交額(萬)","成交額(萬)","%.0f"), ("5日均額","5日均額(萬)","%.0f"), ("PER","本益比","%.2f")]}
             })
 
     with tab_momentum:
-        st.markdown("#### 資金動力渦輪：找出真正的行情燃料\n<small>排除流動性過差標的 (成交額 > 50M 且 股價 > 10)，避免倍數失真。</small>", unsafe_allow_html=True)
-        if '成交額(百萬)' in f_df.columns and '成交' in f_df.columns:
-            m_df = f_df[(f_df['成交額(百萬)'] > 50) & (f_df['成交'] > 10) & (f_df.get('5日均額', 0) > 10)].copy()
+        st.markdown("#### 資金動力渦輪：找出真正的行情燃料\n<small>排除流動性過差標的 (避免倍數失真)。</small>", unsafe_allow_html=True)
+        # 🚀 單位由百萬轉為萬，過濾條件改為 > 5000萬 (即原來的 50M)
+        if '成交額(萬)' in f_df.columns and '成交' in f_df.columns:
+            m_df = f_df[(f_df['成交額(萬)'] > 5000) & (f_df['成交'] > 10)].copy()
         else:
             m_df = f_df.copy()
             
         periods = [5, 10, 20, 30, 45]
-        base_cfg = {"統一代號": st.column_config.TextColumn("代號"), "股票名稱": st.column_config.TextColumn("名稱"), "成交金額日變化率": st.column_config.NumberColumn("日變化率(%)", format="%+.1f %%"), "成交額(百萬)": st.column_config.NumberColumn("今日成交額", format="%.0f")}
+        base_cfg = {"統一代號": st.column_config.TextColumn("代號"), "股票名稱": st.column_config.TextColumn("名稱"), "成交金額日變化率": st.column_config.NumberColumn("日變化率(%)", format="%+.1f %%"), "成交額(萬)": st.column_config.NumberColumn("今日成交(萬)", format="%.0f")}
 
         st.markdown("---")
         st.markdown("##### 🏆 成交額大熱鍋\n<small>市場資金總量增加最多，代表用錢砸出來的活絡程度。</small>", unsafe_allow_html=True)
         abs_tabs = st.tabs(["🔥 總覽"] + [f"🔹相較 {p} 日" for p in periods])
         with abs_tabs[0]:
-            sort_k = '較5日均額增加' if '較5日均額增加' in m_df.columns else '成交額(百萬)'
-            abs_cols = [c for c in ['統一代號', '股票名稱', '成交金額日變化率', '成交額(百萬)'] + [f'較{p}日均額增加' for p in periods] if c in m_df.columns]
-            if not m_df.empty:
-                st.dataframe(m_df.sort_values(sort_k, ascending=False).head(50)[abs_cols], use_container_width=True, hide_index=True, height=500, column_config={**base_cfg, **{f'較{p}日均額增加': st.column_config.NumberColumn(f"較{p}日增加", format="+%.0f") for p in periods}})
+            # 🚀 修正 fallback KeyError：改用新的 成交額(萬)
+            sort_k = '較5日均額增加' if '較5日均額增加' in m_df.columns else '成交額(萬)'
+            abs_cols = [c for c in ['統一代號', '股票名稱', '成交金額日變化率', '成交額(萬)'] + [f'較{p}日均額增加' for p in periods] if c in m_df.columns]
+            if not m_df.empty and sort_k in m_df.columns:
+                st.dataframe(m_df.sort_values(sort_k, ascending=False).head(50)[abs_cols], use_container_width=True, hide_index=True, height=500, column_config={**base_cfg, **{f'較{p}日均額增加': st.column_config.NumberColumn(f"較{p}日增加(萬)", format="+%.0f") for p in periods}})
         
         for i, p in enumerate(periods):
             with abs_tabs[i+1]:
                 if f'較{p}日均額增加' in m_df.columns and not m_df.empty:
-                    st.dataframe(m_df.sort_values(f'較{p}日均額增加', ascending=False).head(30)[['統一代號', '股票名稱', f'較{p}日均額增加', '成交額(百萬)', f'{p}日均額', '成交金額日變化率', '漲跌幅']], use_container_width=True, hide_index=True, height=400, column_config={**base_cfg, f'較{p}日均額增加': st.column_config.NumberColumn(f"▲較{p}日增加", format="+%.0f"), f'{p}日均額': st.column_config.NumberColumn(f"{p}日均額", format="%.0f"), "漲跌幅": st.column_config.NumberColumn("漲跌幅%", format="%.2f")})
+                    st.dataframe(m_df.sort_values(f'較{p}日均額增加', ascending=False).head(30)[['統一代號', '股票名稱', f'較{p}日均額增加', '成交額(萬)', f'{p}日均額', '成交金額日變化率', '漲跌幅']], use_container_width=True, hide_index=True, height=400, column_config={**base_cfg, f'較{p}日均額增加': st.column_config.NumberColumn(f"▲較{p}日增加(萬)", format="+%.0f"), f'{p}日均額': st.column_config.NumberColumn(f"{p}日均額(萬)", format="%.0f"), "漲跌幅": st.column_config.NumberColumn("漲跌幅%", format="%.2f")})
 
         st.markdown("##### 🚀 出量點火器\n<small>尋找異常放量的股票 (突破或波段發動)。</small>", unsafe_allow_html=True)
         ign_tabs = st.tabs(["🔥 總覽"] + [f"🔹相較 {p} 日" for p in periods])
         with ign_tabs[0]:
-            sort_k = '5日爆發倍數' if '5日爆發倍數' in m_df.columns else '成交額(百萬)'
-            ign_cols = [c for c in ['統一代號', '股票名稱', '成交金額日變化率', '成交額(百萬)'] + [f'{p}日爆發倍數' for p in periods] if c in m_df.columns]
-            if not m_df.empty:
+            sort_k = '5日爆發倍數' if '5日爆發倍數' in m_df.columns else '成交額(萬)'
+            ign_cols = [c for c in ['統一代號', '股票名稱', '成交金額日變化率', '成交額(萬)'] + [f'{p}日爆發倍數' for p in periods] if c in m_df.columns]
+            if not m_df.empty and sort_k in m_df.columns:
                 st.dataframe(m_df.sort_values(sort_k, ascending=False).head(50)[ign_cols], use_container_width=True, hide_index=True, height=500, column_config={**base_cfg, **{f'{p}日爆發倍數': st.column_config.NumberColumn(f"{p}日倍數", format="%.1fx") for p in periods}})
 
         for i, p in enumerate(periods):
             with ign_tabs[i+1]:
                 if f'{p}日爆發倍數' in m_df.columns and not m_df.empty:
-                    st.dataframe(m_df.sort_values(f'{p}日爆發倍數', ascending=False).head(30)[['統一代號', '股票名稱', f'{p}日爆發倍數', '成交額(百萬)', f'{p}日均額', '成交金額日變化率', '漲跌幅']], use_container_width=True, hide_index=True, height=400, column_config={**base_cfg, f'{p}日爆發倍數': st.column_config.NumberColumn("🚀爆發倍數", format="%.1fx"), f'{p}日均額': st.column_config.NumberColumn(f"{p}日均額", format="%.0f"), "漲跌幅": st.column_config.NumberColumn("漲跌幅%", format="%.2f")})
+                    st.dataframe(m_df.sort_values(f'{p}日爆發倍數', ascending=False).head(30)[['統一代號', '股票名稱', f'{p}日爆發倍數', '成交額(萬)', f'{p}日均額', '成交金額日變化率', '漲跌幅']], use_container_width=True, hide_index=True, height=400, column_config={**base_cfg, f'{p}日爆發倍數': st.column_config.NumberColumn("🚀爆發倍數", format="%.1fx"), f'{p}日均額': st.column_config.NumberColumn(f"{p}日均額(萬)", format="%.0f"), "漲跌幅": st.column_config.NumberColumn("漲跌幅%", format="%.2f")})
 
         st.markdown("##### 📈 持續資金水龍頭\n<small>短週期 > 長週期，代表成交金額持續擴張，資金連續進駐。</small>", unsafe_allow_html=True)
-        if '成交額(百萬)' in m_df.columns and not m_df.empty:
-            flow_cols = [c for c in ['統一代號', '股票名稱', '資金延續趨勢', '成交額(百萬)', '5日均額', '10日均額', '20日均額', '30日均額'] if c in m_df.columns]
-            st.dataframe(m_df.sort_values('成交額(百萬)', ascending=False).head(150)[flow_cols], use_container_width=True, hide_index=True, height=600, column_config={"統一代號": "代號", "股票名稱": "名稱", "資金延續趨勢": st.column_config.TextColumn("資金延續狀態", width="medium"), **{k: st.column_config.NumberColumn(n, format="%.0f") for k, n in [("成交額(百萬)","今日成交"), ("5日均額","5日均"), ("10日均額","10日均"), ("20日均額","20日均"), ("30日均額","30日均")]}})
+        if '成交額(萬)' in m_df.columns and not m_df.empty:
+            flow_cols = [c for c in ['統一代號', '股票名稱', '資金延續趨勢', '成交額(萬)', '5日均額', '10日均額', '20日均額', '30日均額'] if c in m_df.columns]
+            st.dataframe(m_df.sort_values('成交額(萬)', ascending=False).head(150)[flow_cols], use_container_width=True, hide_index=True, height=600, column_config={"統一代號": "代號", "股票名稱": "名稱", "資金延續趨勢": st.column_config.TextColumn("資金延續狀態", width="medium"), **{k: st.column_config.NumberColumn(n, format="%.0f") for k, n in [("成交額(萬)","今日成交(萬)"), ("5日均額","5日均"), ("10日均額","10日均"), ("20日均額","20日均"), ("30日均額","30日均")]}})
 
 # ==========================================
 # 🌟 主渲染入口
@@ -213,7 +244,7 @@ def show_b0_page(DATA_DIR, STOCK_DICT):
     st.caption(f"資料基準日: **{dt_str}** ｜ 透視全市場資金動能與主力控盤狀態。")
     st.write("---")
     
-    # 🚀 Vectorized name mapping (只有名字為空時透過 STOCK_DICT 補足)
+    # 🚀 Vectorized name mapping
     if 'B0_原始名稱' in df_b0.columns:
         df_b0['股票名稱'] = df_b0['B0_原始名稱'].replace({'nan': '', 'none': '', 'NaN': ''})
         if STOCK_DICT:
