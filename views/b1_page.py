@@ -212,14 +212,13 @@ def build_block1_master_df(data_dir):
                     f_df['△'] = f_df.apply(lambda row: row[d_cols[0]] - row[d_cols[1]] if row[d_cols[1]] > 0.001 else 0.0, axis=1).astype('float32')
                 else: f_df['△'] = 0.0
                 
-            f_df['法人金額'] = 0.0 
 
             for d in [5, 20, 60, 120]:
                 if d in j_dfs and not j_dfs[d].empty:
                     temp_json = j_dfs[d][['股票代號', f'{d}日ΔChange', f'{d}日排名']]
                     f_df = pd.merge(f_df, temp_json, on='股票代號', how='left')
 
-            # 🚀 尋找「前一個交易日」的 master_features，解決忘記搬檔案與排名相減為 0 的 Bug
+            # 🚀 尋找最新與前一日的 master_features，解決法人金額與排名相減為 0 的 Bug
             cache_dir = os.path.join(os.path.dirname(data_dir), "data_cache") if "data" in data_dir else data_dir
             master_files = glob.glob(os.path.join(data_dir, "*master_features*.parquet")) + \
                            glob.glob(os.path.join(data_dir, "*master_features*.csv")) + \
@@ -231,9 +230,24 @@ def build_block1_master_df(data_dir):
             # 以快照最新日期 (例如 10/08) 作為當前基準日
             current_target_date = sorted_dates[0] if sorted_dates else datetime.datetime.now().strftime("%Y%m%d")
             
-            # 抓取「嚴格小於」基準日的檔案 (確保拿到 10/07 的舊排名)
+            # 💡 抓取今日與前一日的 master_features 檔案
+            today_mf = next((f for f in master_files if extract_date_from_filename(os.path.basename(f)) == current_target_date), None)
             prev_mf = next((f for f in master_files if extract_date_from_filename(os.path.basename(f)) and extract_date_from_filename(os.path.basename(f)) < current_target_date), None)
             
+            # 1️⃣ 把今日後台算好的「法人金額」補上去
+            if today_mf:
+                try:
+                    df_today_master = pd.read_parquet(today_mf) if today_mf.endswith('.parquet') else pd.read_csv(today_mf, dtype=str)
+                    code_col = 'stock_code' if 'stock_code' in df_today_master.columns else ('統一代號' if '統一代號' in df_today_master.columns else None)
+                    if code_col:
+                        amt_cols = [code_col] + [f'B1_{d}日法人金額(萬)' for d in [5, 20, 60, 120] if f'B1_{d}日法人金額(萬)' in df_today_master.columns]
+                        df_amts = df_today_master[amt_cols].copy()
+                        df_amts = df_amts.rename(columns={code_col: '股票代號'})
+                        df_amts['股票代號'] = df_amts['股票代號'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.zfill(4)
+                        f_df = pd.merge(f_df, df_amts, on='股票代號', how='left')
+                except Exception: pass
+            
+            # 2️⃣ 把昨日後台的「名次」補上去相減
             df_prev_ranks = pd.DataFrame(columns=['股票代號'])
             if prev_mf:
                 try:
@@ -546,8 +560,6 @@ def render_admin_panel(DATA_DIR, local_latest_date, is_updated_today, status_tex
                         
             elif admin_pw != "": 
                 st.error("❌ 密碼錯誤，無法使用此功能。")
-
-
 @st.fragment
 def render_b1_main_tables(final_df, color_ref, date_cols):
     c1, c2, c3 = st.columns([1, 1, 2])
@@ -566,7 +578,7 @@ def render_b1_main_tables(final_df, color_ref, date_cols):
     def get_local_tab_df(target_day_str):
         if final_df is None or final_df.empty: return pd.DataFrame()
         
-        # 🚀 修復字串比對 Bug：精準匹配顏色標籤，避免 "120日" 包含 "20日" 導致的誤判
+        # 🚀 修復 120日 與 20日 字串匹配 Bug
         tag_map = {
             5: '🔴5日',
             20: '🟡20日',
@@ -602,27 +614,33 @@ def render_b1_main_tables(final_df, color_ref, date_cols):
         if change_col in df.columns: 
             df[change_col] = df[change_col].apply(format_delta)
             
-        df['法人金額'] = "0.00" 
+        # 🚀 取代掉預設的 "0.00"，真實載入「法人金額」！
+        amt_col = f'B1_{target_day_str}日法人金額(萬)'
+        if amt_col in df.columns:
+            df['法人金額(萬)'] = pd.to_numeric(df[amt_col], errors='coerce').fillna(0).apply(lambda x: f"{x:,.0f}" if x != 0 else "0")
+        else:
+            df['法人金額(萬)'] = "0"
+            
         df['最新動態'] = df['最新動態'].astype(str).replace("nan", "⚪ 尚無比對紀錄")
         return df
 
-    # 🚀 在前端的 display_cols 中加入剛算好的 △排名 欄位
+    # 🚀 在前端的 display_cols 中加入剛算好的 △排名 以及 法人金額(萬)
     with tab5:
         df_5 = get_local_tab_df(5)
-        display_cols = ['5日排名', '5日△排名', '股票代號', '股票名稱', '法人持股', '△', '5日ΔChange', '法人金額', '最新動態', '今日上榜']
+        display_cols = ['5日排名', '5日△排名', '股票代號', '股票名稱', '法人持股', '△', '5日ΔChange', '法人金額(萬)', '最新動態', '今日上榜']
         if not df_5.empty: st.dataframe(df_5[[c for c in display_cols if c in df_5.columns]], use_container_width=True, hide_index=True)
         else: st.info("⚪ 尚無 5日進榜數據。")
     with tab20:
         df_20 = get_local_tab_df(20)
-        display_cols = ['20日排名', '20日△排名', '股票代號', '股票名稱', '法人持股', '△', '20日ΔChange', '法人金額', '最新動態', '今日上榜']
+        display_cols = ['20日排名', '20日△排名', '股票代號', '股票名稱', '法人持股', '△', '20日ΔChange', '法人金額(萬)', '最新動態', '今日上榜']
         if not df_20.empty: st.dataframe(df_20[[c for c in display_cols if c in df_20.columns]], use_container_width=True, hide_index=True)
     with tab60:
         df_60 = get_local_tab_df(60)
-        display_cols = ['60日排名', '60日△排名', '股票代號', '股票名稱', '法人持股', '△', '60日ΔChange', '法人金額', '最新動態', '今日上榜']
+        display_cols = ['60日排名', '60日△排名', '股票代號', '股票名稱', '法人持股', '△', '60日ΔChange', '法人金額(萬)', '最新動態', '今日上榜']
         if not df_60.empty: st.dataframe(df_60[[c for c in display_cols if c in df_60.columns]], use_container_width=True, hide_index=True)
     with tab120:
         df_120 = get_local_tab_df(120)
-        display_cols = ['120日排名', '120日△排名', '股票代號', '股票名稱', '法人持股', '△', '120日ΔChange', '法人金額', '最新動態', '今日上榜']
+        display_cols = ['120日排名', '120日△排名', '股票代號', '股票名稱', '法人持股', '△', '120日ΔChange', '法人金額(萬)', '最新動態', '今日上榜']
         if not df_120.empty: st.dataframe(df_120[[c for c in display_cols if c in df_120.columns]], use_container_width=True, hide_index=True)
             
     with tab_all:
@@ -664,7 +682,6 @@ def render_b1_main_tables(final_df, color_ref, date_cols):
 
     st.write("")
     st.info("💡 △是單日的法人持股增減(如果最新基準日未進前200榜，△會直接以歸0計算)；5/20/60/120日ΔChange為5/20/60/120期間的累積變化，我們可以試著短線與長線一起觀察。")
-
 
 @st.fragment
 def render_b1_treemap(final_df, STOCK_DICT):
