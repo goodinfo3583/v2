@@ -578,7 +578,6 @@ def render_b1_main_tables(final_df, color_ref, date_cols):
     def get_local_tab_df(target_day_str):
         if final_df is None or final_df.empty: return pd.DataFrame()
         
-        # 🚀 修復 120日 與 20日 字串匹配 Bug
         tag_map = {
             5: '🔴5日',
             20: '🟡20日',
@@ -614,34 +613,38 @@ def render_b1_main_tables(final_df, color_ref, date_cols):
         if change_col in df.columns: 
             df[change_col] = df[change_col].apply(format_delta)
             
-        # 🚀 取代掉預設的 "0.00"，真實載入「法人金額」！
+        # 🚀 關鍵修復：這裡「絕對不能」轉成字串！保留 float 格式，填補 0.0
         amt_col = f'B1_{target_day_str}日法人金額(萬)'
         if amt_col in df.columns:
-            df['法人金額(萬)'] = pd.to_numeric(df[amt_col], errors='coerce').fillna(0).apply(lambda x: f"{x:,.0f}" if x != 0 else "0")
+            df['法人金額(萬)'] = pd.to_numeric(df[amt_col], errors='coerce').fillna(0.0)
         else:
-            df['法人金額(萬)'] = "0"
+            df['法人金額(萬)'] = 0.0
             
         df['最新動態'] = df['最新動態'].astype(str).replace("nan", "⚪ 尚無比對紀錄")
         return df
 
-    # 🚀 在前端的 display_cols 中加入剛算好的 △排名 以及 法人金額(萬)
+    # 🚀 前端顯示配置，透過 column_config 來將數字加上逗號，而不會破壞排序
+    table_config = {
+        "法人金額(萬)": st.column_config.NumberColumn("法人金額(萬)", format="%.0f")
+    }
+
     with tab5:
         df_5 = get_local_tab_df(5)
         display_cols = ['5日排名', '5日△排名', '股票代號', '股票名稱', '法人持股', '△', '5日ΔChange', '法人金額(萬)', '最新動態', '今日上榜']
-        if not df_5.empty: st.dataframe(df_5[[c for c in display_cols if c in df_5.columns]], use_container_width=True, hide_index=True)
+        if not df_5.empty: st.dataframe(df_5[[c for c in display_cols if c in df_5.columns]], use_container_width=True, hide_index=True, column_config=table_config)
         else: st.info("⚪ 尚無 5日進榜數據。")
     with tab20:
         df_20 = get_local_tab_df(20)
         display_cols = ['20日排名', '20日△排名', '股票代號', '股票名稱', '法人持股', '△', '20日ΔChange', '法人金額(萬)', '最新動態', '今日上榜']
-        if not df_20.empty: st.dataframe(df_20[[c for c in display_cols if c in df_20.columns]], use_container_width=True, hide_index=True)
+        if not df_20.empty: st.dataframe(df_20[[c for c in display_cols if c in df_20.columns]], use_container_width=True, hide_index=True, column_config=table_config)
     with tab60:
         df_60 = get_local_tab_df(60)
         display_cols = ['60日排名', '60日△排名', '股票代號', '股票名稱', '法人持股', '△', '60日ΔChange', '法人金額(萬)', '最新動態', '今日上榜']
-        if not df_60.empty: st.dataframe(df_60[[c for c in display_cols if c in df_60.columns]], use_container_width=True, hide_index=True)
+        if not df_60.empty: st.dataframe(df_60[[c for c in display_cols if c in df_60.columns]], use_container_width=True, hide_index=True, column_config=table_config)
     with tab120:
         df_120 = get_local_tab_df(120)
         display_cols = ['120日排名', '120日△排名', '股票代號', '股票名稱', '法人持股', '△', '120日ΔChange', '法人金額(萬)', '最新動態', '今日上榜']
-        if not df_120.empty: st.dataframe(df_120[[c for c in display_cols if c in df_120.columns]], use_container_width=True, hide_index=True)
+        if not df_120.empty: st.dataframe(df_120[[c for c in display_cols if c in df_120.columns]], use_container_width=True, hide_index=True, column_config=table_config)
             
     with tab_all:
         if final_df is not None and not final_df.empty:
