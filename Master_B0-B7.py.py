@@ -941,6 +941,7 @@ def process_b5_features(DATA_DIR):
 # 模組五：大一統合併與終極精算
 # ==========================================
 def run_master_pipeline():
+    # 💡 修改這裡：將 OUTPUT_DIR 直接指向 "./data"，算完直接給前台吃，再也不用手動搬運！
     DATA_DIR, OUTPUT_DIR = "./data", "./data"
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
@@ -955,20 +956,19 @@ def run_master_pipeline():
     df_b1 = process_b1_features(DATA_DIR, target_date)
     df_b23 = process_b2_b3_features(DATA_DIR, target_date)
     df_b4 = process_b4_features(DATA_DIR, target_date)
-    df_b5 = process_b5_features(DATA_DIR) # B5大股東資料，週更新
+    df_b5 = process_b5_features(DATA_DIR)
     df_b6 = process_b6_features(DATA_DIR, target_date)   
-    df_b7 = process_b7_features(DATA_DIR) # B7是月更資料，不需要傳入嚴格的 target_date，抓取資料夾內最新的月份來算
+    df_b7 = process_b7_features(DATA_DIR) 
 
     print("▶️ [5/5] 執行 B0+B1+B2+B3+B4+B5+B6+B7 表格淨化中...")
     
     drop_targets = ['股票代號', '股票名稱', '證券代號', '證券名稱', '名稱', '日期', '排名']
     
-    # 👇 陣列裡補上 df_b7 👇
     for df in [df_b0, df_b1, df_b23, df_b4, df_b5, df_b6, df_b7]:
         if df is not None:
             df.drop(columns=[c for c in drop_targets if c in df.columns], inplace=True, errors='ignore')
 
-# === 合併主體 ===
+    # === 合併主體 ===
     df_master = df_b0.copy()
     if df_b1 is not None: df_master = pd.merge(df_master, df_b1, on='stock_code', how='left')
     if df_b23 is not None: df_master = pd.merge(df_master, df_b23, on='stock_code', how='left')
