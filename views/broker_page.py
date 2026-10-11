@@ -547,7 +547,8 @@ def render(STOCK_DICT=None):
     st.markdown("### 🔍 個股查詢與走勢圖")
     stock_options = []
     if STOCK_DICT:
-        unique_options = {f"{v['id']} {v['name']}" for v in STOCK_DICT.values() if len(str(v['id'])) <= 4}
+        # ✅ 將 <= 4 改為 <= 6，並加上 .strip() 確保沒有隱藏空白
+        unique_options = {f"{str(v['id']).strip()} {v['name']}" for v in STOCK_DICT.values() if len(str(v['id']).strip()) <= 6}
         stock_options = sorted(list(unique_options))
 
     col1, col2 = st.columns([3, 1])

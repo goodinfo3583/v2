@@ -994,7 +994,7 @@ def render_sidebar_war_room(STOCK_DICT, DATA_DIR="data"):
             # 暫時加這行印在畫面上測試
             st.write("測試 00919 是否存在字典：", STOCK_DICT.get("00919", "找不到該代碼！"))
             # ✅ 修正：將 <= 4 改為 <= 6，以支援如 00981A 等 ETF 標的
-            unique_options = {f"{v['id']} {v['name']}" for v in STOCK_DICT.values() if len(str(v['id'])) <= 6}
+            unique_options = {f"{str(v['id']).strip()} {v['name']}" for v in STOCK_DICT.values() if len(str(v['id']).strip()) <= 6}
             stock_options = sorted(list(unique_options))
             
         with c_search:
