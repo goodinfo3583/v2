@@ -991,9 +991,10 @@ def render_sidebar_war_room(STOCK_DICT, DATA_DIR="data"):
         
         stock_options = []
         if STOCK_DICT:
-            unique_options = {f"{v['id']} {v['name']}" for v in STOCK_DICT.values() if len(str(v['id'])) <= 4}
+            # ✅ 修正：將 <= 4 改為 <= 6，以支援如 00981A 等 ETF 標的
+            unique_options = {f"{v['id']} {v['name']}" for v in STOCK_DICT.values() if len(str(v['id'])) <= 6}
             stock_options = sorted(list(unique_options))
-
+            
         with c_search:
             search_query = st.selectbox(
                 "搜尋標的",
@@ -1014,7 +1015,8 @@ def render_sidebar_war_room(STOCK_DICT, DATA_DIR="data"):
         
         if search_query:
             query_clean = search_query.strip()
-            match_code = re.search(r'^[A-Za-z0-9]{2,4}', query_clean)
+            # ✅ 修正：將 {2,4} 改為 {2,6}，完整抓取 5~6 碼的股票代號
+            match_code = re.search(r'^[A-Za-z0-9]{2,6}', query_clean)
             
             if match_code:
                 pure_stock_id = match_code.group(0)
