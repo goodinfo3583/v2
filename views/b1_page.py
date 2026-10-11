@@ -565,7 +565,17 @@ def render_b1_main_tables(final_df, color_ref, date_cols):
 
     def get_local_tab_df(target_day_str):
         if final_df is None or final_df.empty: return pd.DataFrame()
-        df = final_df[final_df['今日上榜'].astype(str).str.contains(f'{target_day_str}日', na=False)].copy()
+        
+        # 🚀 修復字串比對 Bug：精準匹配顏色標籤，避免 "120日" 包含 "20日" 導致的誤判
+        tag_map = {
+            5: '🔴5日',
+            20: '🟡20日',
+            60: '🟢60日',
+            120: '🔵120日'
+        }
+        target_tag = tag_map[int(target_day_str)]
+        df = final_df[final_df['今日上榜'].astype(str).str.contains(target_tag, na=False, regex=False)].copy()
+        
         if df.empty: return df
         
         code_str = df['股票代號'].astype(str)
