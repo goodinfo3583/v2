@@ -996,6 +996,25 @@ def render_sidebar_war_room(STOCK_DICT, DATA_DIR="data"):
             # ✅ 修正：將 <= 4 改為 <= 6，以支援如 00981A 等 ETF 標的
             unique_options = {f"{str(v['id']).strip()} {v['name']}" for v in STOCK_DICT.values() if len(str(v['id']).strip()) <= 6}
             stock_options = sorted(list(unique_options))
+
+        # ====== 🌟 新增：讀取本地 ETF txt 檔案並合併至選單 ======
+        etf_file_path = os.path.join(DATA_DIR, "本國ETF證券辨識號碼一覽表.txt")
+        if os.path.exists(etf_file_path):
+            try:
+                with open(etf_file_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                    # 從第 3 行開始讀取（跳過「20261011更新」與「ETF代號 ETF名稱」兩行表頭）
+                    for line in lines[2:]: 
+                        parts = line.strip().split()
+                        if len(parts) >= 2:
+                            # 將 ETF 代號與名稱組合後加入選單
+                            stock_options.append(f"{parts[0]} {parts[1]}")
+                
+                # 重新去重並排序，讓 ETF 完美融入下拉選單
+                stock_options = sorted(list(set(stock_options)))
+            except Exception as e:
+                pass
+        # ========================================================
             
         with c_search:
             search_query = st.selectbox(
