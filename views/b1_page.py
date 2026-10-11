@@ -219,13 +219,20 @@ def build_block1_master_df(data_dir):
                     temp_json = j_dfs[d][['股票代號', f'{d}日ΔChange', f'{d}日排名']]
                     f_df = pd.merge(f_df, temp_json, on='股票代號', how='left')
 
-            # 🚀 尋找「前一個交易日」的 master_features 來抓取前一日排名 (支援前台顯示△排名)
-            today_str = datetime.datetime.now().strftime("%Y%m%d")
-            master_files = glob.glob(os.path.join(data_dir, "*master_features*.parquet")) + glob.glob(os.path.join(data_dir, "*master_features*.csv"))
+            # 🚀 尋找「前一個交易日」的 master_features，解決忘記搬檔案與排名相減為 0 的 Bug
+            cache_dir = os.path.join(os.path.dirname(data_dir), "data_cache") if "data" in data_dir else data_dir
+            master_files = glob.glob(os.path.join(data_dir, "*master_features*.parquet")) + \
+                           glob.glob(os.path.join(data_dir, "*master_features*.csv")) + \
+                           glob.glob(os.path.join(cache_dir, "*master_features*.parquet")) + \
+                           glob.glob(os.path.join(cache_dir, "*master_features*.csv"))
+                           
             master_files = sorted(master_files, key=lambda x: extract_date_from_filename(os.path.basename(x)) or "00000000", reverse=True)
             
-            # 抓比今天日期小的最新檔案 (也就是昨天的 master 檔)
-            prev_mf = next((f for f in master_files if extract_date_from_filename(os.path.basename(f)) and extract_date_from_filename(os.path.basename(f)) < today_str), None)
+            # 以快照最新日期 (例如 10/08) 作為當前基準日
+            current_target_date = sorted_dates[0] if sorted_dates else datetime.datetime.now().strftime("%Y%m%d")
+            
+            # 抓取「嚴格小於」基準日的檔案 (確保拿到 10/07 的舊排名)
+            prev_mf = next((f for f in master_files if extract_date_from_filename(os.path.basename(f)) and extract_date_from_filename(os.path.basename(f)) < current_target_date), None)
             
             df_prev_ranks = pd.DataFrame(columns=['股票代號'])
             if prev_mf:
@@ -243,6 +250,7 @@ def build_block1_master_df(data_dir):
             if not df_prev_ranks.empty:
                 f_df = pd.merge(f_df, df_prev_ranks, on='股票代號', how='left')
                 
+            # 計算最新排名差異
             for d in [5, 20, 60, 120]:
                 col_today = f'{d}日排名'
                 col_yest = f'{d}日前一日排名'
@@ -257,9 +265,10 @@ def build_block1_master_df(data_dir):
                 def calc_rank_delta_front(row):
                     t = row[col_today]
                     y = row[col_yest]
-                    if pd.isna(t): return "-"
-                    if pd.isna(y): return "🆕 新進榜"
-                    diff = y - t
+                    if pd.isna(t) or t <= 0: return "-"
+                    if pd.isna(y) or y <= 0: return "🆕 新進榜"
+                    
+                    diff = y - t # 名次越小越前面，昨天減今天正數代表上升
                     if diff > 0: return f"🔺 +{int(diff)}"
                     elif diff < 0: return f"🔻 {int(diff)}"
                     else: return "➖ 0"
@@ -619,16 +628,12 @@ def render_b1_main_tables(final_df, color_ref, date_cols):
                 mask &= (code_str.str.contains(search_kw, na=False)) | (final_df['股票名稱'].astype(str).str.contains(search_kw, na=False))
                 
             filtered_df = final_df[mask].copy()
-            
-            # 💡 因為是 float32，直接排序
             filtered_df = filtered_df.sort_values(by='△', ascending=False)
             
-            # 將 8 碼日期縮減為 4 碼
             rename_dict = {c: f"{c[4:8]}持股%" for c in date_cols}
             filtered_df = filtered_df.rename(columns=rename_dict)
             new_date_cols = [rename_dict[c] for c in date_cols]
             
-            # 💡 只有在顯示時才掛上 % 跟 未進榜 的字眼
             for c in new_date_cols:
                 filtered_df[c] = filtered_df[c].apply(lambda x: "未進榜" if pd.isna(x) or x == 0 else f"{x:.2f}")
                 
@@ -638,10 +643,10 @@ def render_b1_main_tables(final_df, color_ref, date_cols):
             def highlight_row(row):
                 cnt = color_ref.get(row['股票代號'], 0)
                 if cnt == 4: bg = 'background-color: rgba(240, 90, 90, 0.25)'     
-                elif cnt == 3: bg = 'background-color: rgba(255, 165, 0, 0.25)'    
-                elif cnt == 2: bg = 'background-color: rgba(80, 200, 120, 0.25)'    
-                elif cnt == 1: bg = 'background-color: rgba(0, 127, 255, 0.25)'    
-                else: bg = 'background-color: #111622; color: #E2E8F0'                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
+                elif cnt == 3: bg = 'background-color: rgba(255, 165, 0, 0.25)'   
+                elif cnt == 2: bg = 'background-color: rgba(80, 200, 120, 0.25)'  
+                elif cnt == 1: bg = 'background-color: rgba(0, 127, 255, 0.25)'   
+                else: bg = 'background-color: #111622; color: #E2E8F0'                                                                                                                                                                                                                                                                                                                                                                                                                              
                 return [bg] * len(row)
                 
             all_display_cols = ['股票代號', '股票名稱', '今日上榜', '最新動態', '△'] + new_date_cols
