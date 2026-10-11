@@ -545,17 +545,16 @@ def render(STOCK_DICT=None):
     # 個股查詢
     st.markdown("---")
     st.markdown("### 🔍 個股查詢與走勢圖")
-    
     stock_options = []
     if STOCK_DICT:
         # ✅ 將 <= 4 改為 <= 6，並加上 .strip() 確保沒有隱藏空白
         unique_options = {f"{str(v['id']).strip()} {v['name']}" for v in STOCK_DICT.values() if len(str(v['id']).strip()) <= 6}
         stock_options = sorted(list(unique_options))
 
-    # ====== 🌟 新增：讓 broker_page 也能讀取 ETF txt 檔案 ======
+    # ====== 🌟 新增：讓 broker_page 也能讀取 ETF txt 檔案 (無敵解碼版) ======
     import os
-    # 假設主程式的執行目錄結構不變，這裡指向 data 資料夾
-    etf_file_path = os.path.join("data", "本國ETF證券辨識號碼一覽表.txt")
+    # 確保路徑指向 data 資料夾內的正確檔名
+    etf_file_path = os.path.join("data", "本國ETF證券辨識號碼一覽表_2.txt")
     
     if os.path.exists(etf_file_path):
         read_success = False
@@ -574,6 +573,8 @@ def render(STOCK_DICT=None):
         
         if read_success:
             stock_options = sorted(list(set(stock_options)))
+        else:
+            st.error("⚠️ ETF 檔案讀取失敗：編碼無法解析。")
     # ========================================================
 
     col1, col2 = st.columns([3, 1])
