@@ -39,11 +39,7 @@ KEY_MAP = {
 def get_sidebar_df(primary_key):
     """🌟 側邊欄專用萬能變數雷達 (記憶體優化版)"""
     if primary_key == 'broker_history':
-        try:
-            from views.broker_page import load_full_blood_broker_history
-            return load_full_blood_broker_history()
-        except Exception:
-            return pd.DataFrame()
+        return pd.DataFrame() # 已由 get_single_stock_broker 取代，不再快取全表
 
     aliases = KEY_MAP.get(primary_key, [primary_key])
     for k in aliases:
@@ -129,6 +125,11 @@ def scan_and_display(title, session_key, query):
         return
     res = robust_search_engine(df, query)
     if not res.empty:
+        # ====== 🌟 修正：將表格中的 0 替換為 未進榜 ======
+        for c in res.columns:
+            if '持股' in c or '佔' in c or '%' in c or str(c)[0].isdigit() or '發行' in c or '成交' in c:
+                res[c] = res[c].apply(lambda x: "未進榜" if str(x).strip() in ['0', '0.0', '0.00'] else x)
+        # ================================================
         pct_cols = [c for c in res.columns if '持股' in c or '佔' in c or '%' in c]
         if pct_cols:
             all_zero = True
@@ -883,16 +884,14 @@ def get_img_html(filename, height="28px"):
             img_b64 = base64.b64encode(f.read()).decode("utf-8")
         return f'<img src="data:image/png;base64,{img_b64}" style="height: {height}; vertical-align: text-bottom; margin-right: 8px;">'
     return "" 
-# =======================================================
-# 🚀 效能優化快取區塊：將 Plotly 圖表繪製獨立出來並快取
-# =======================================================
 @st.cache_data(show_spinner=False, ttl=300)
 def create_b1_bar_chart(stock_name, clean_x_labels, y_vals):
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=clean_x_labels, y=y_vals,  
         marker_color=['#FF4B4B' if i == len(y_vals)-1 else '#4B8BFF' for i in range(len(y_vals))],
-        text=[f"{v}%" if v > 0 else "" for v in y_vals], textposition='outside'
+        # 🌟 修正：加入 v is not None 判斷
+        text=[f"{v}%" if v is not None and v > 0 else "" for v in y_vals], textposition='outside'
     ))
     fig.update_layout(
         title=dict(text=f"📈 持股波段真實軌跡 ({stock_name})", font=dict(color="#E2E8F0")),
@@ -908,7 +907,8 @@ def create_b1_down_bar_chart(stock_name_down, clean_x_labels_down, y_vals_down):
     fig.add_trace(go.Bar(
         x=clean_x_labels_down, y=y_vals_down,
         marker_color=['#00E676' if i == len(y_vals_down)-1 else '#0284C7' for i in range(len(y_vals_down))],
-        text=[f"{v}%" if v > 0 else "" for v in y_vals_down], textposition='outside'
+        # 🌟 修正：加入 v is not None 判斷
+        text=[f"{v}%" if v is not None and v > 0 else "" for v in y_vals_down], textposition='outside'
     ))
     fig.update_layout(
         title=dict(text=f"📉 衰退波段真實軌跡 ({stock_name_down})", font=dict(color="#E2E8F0")),
@@ -924,7 +924,8 @@ def create_foreign_bar_chart(clean_x_for, y_vals_for):
     fig.add_trace(go.Bar(
         x=clean_x_for, y=y_vals_for,
         marker_color='#38BDF8',
-        text=[f"{v}%" if v > 0 else "" for v in y_vals_for], textposition='outside'
+        # 🌟 修正：加入 v is not None 判斷
+        text=[f"{v}%" if v is not None and v > 0 else "" for v in y_vals_for], textposition='outside'
     ))
     fig.update_layout(
         title=dict(text=f"🌎 外資持股 20日軌跡", font=dict(color="#E2E8F0", size=13)),
@@ -933,7 +934,6 @@ def create_foreign_bar_chart(clean_x_for, y_vals_for):
         yaxis=dict(title="外資持股 (%)", showgrid=True, gridcolor='#334155'), xaxis=dict(tickangle=45), dragmode='pan'
     )
     return fig
-
 # =======================================================
 # 🚀 終極局部渲染魔法：將整個側邊視窗獨立為「不閃爍區塊」
 # =======================================================
@@ -1167,6 +1167,11 @@ def render_sidebar_war_room(STOCK_DICT, DATA_DIR="data"):
                 res_b1 = robust_search_engine(df_b1, target_query)
                 if not res_b1.empty:
                     date_cols = [c for c in res_b1.columns if '持股%' in c or c.isdigit()]
+                    # ====== 🌟 修正：替換表格內的 0 ======
+                    for c in date_cols:
+                        res_b1[c] = res_b1[c].apply(lambda x: "未進榜" if str(x).strip() in ['0', '0.0', '0.00'] else x)
+                    # ====================================
+
                     is_all_unranked = True
                     for c in date_cols:
                         val = str(res_b1.iloc[0][c]).strip()
@@ -1393,14 +1398,13 @@ def render_sidebar_war_room(STOCK_DICT, DATA_DIR="data"):
             icon_broker = get_img_html("icon-building.png")
             st.markdown(f"<h4 style='color: #FCD34D;'>{icon_broker}券商主力進階雷達</h4>", unsafe_allow_html=True)
             try:
-                # 1. 載入所需的核心資料表 (已快取，不佔額外記憶體)
-                from views.broker_page import fetch_parquet_from_hf, load_stock_trends, load_full_blood_broker_history
+                # 🌟 1. 改為載入單一股票查詢函數 get_single_stock_broker
+                from views.broker_page import fetch_parquet_from_hf, load_stock_trends, get_single_stock_broker
                 
                 df_tofu = fetch_parquet_from_hf("scan_依股價乖離率吃豆腐排行.parquet")
                 df_multi = fetch_parquet_from_hf("scan_多期程主力買超統計.parquet")
                 df_momentum = fetch_parquet_from_hf("momentum_latest.parquet")
                 df_trends_all = load_stock_trends()
-                df_raw_all = load_full_blood_broker_history()
 
                 stock_id_str = str(pure_stock_id)
 
@@ -1421,8 +1425,6 @@ def render_sidebar_war_room(STOCK_DICT, DATA_DIR="data"):
 
                 # --- B. 全市場排行與成本分析投射 ---
                 st.markdown("🏆 **主力成本與乖離分析**", unsafe_allow_html=True)
-
-                # 豆腐分析 (支援多期程展開顯示)
                 if not df_tofu.empty:
                     tofu_res = df_tofu[df_tofu['股票代號'].astype(str) == stock_id_str]
                     if not tofu_res.empty:
@@ -1451,9 +1453,12 @@ def render_sidebar_war_room(STOCK_DICT, DATA_DIR="data"):
                             st.dataframe(disp_multi.style.format({'期程買超張數': "{:,.0f}", '期程均價': "{:.2f}"}), use_container_width=True, hide_index=True)
 
                 # --- D. 個股歷史趨勢與囤貨矩陣投射 ---
-                if not df_trends_all.empty and not df_raw_all.empty:
-                    stock_raw = df_raw_all[df_raw_all['stock_code'].astype(str) == stock_id_str].copy()
+                # 🌟 改為直接呼叫遠端查詢單一股票，避免讀取全表
+                if not df_trends_all.empty:
                     df_trend = df_trends_all[df_trends_all['stock_code'].astype(str) == stock_id_str].copy()
+                    
+                    # 💡 重點改動：針對這檔股票呼叫 get_single_stock_broker
+                    stock_raw = get_single_stock_broker(stock_id_str)
                     
                     if not stock_raw.empty and not df_trend.empty:
                         st.markdown("🗺️ **分點囤貨與進出軌跡**", unsafe_allow_html=True)
