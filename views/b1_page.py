@@ -58,7 +58,6 @@ def load_foreign_ratio_data(data_dir):
             day_df['代號'] = day_df['代號'].astype(str).str.strip().astype('category')
             day_df = day_df.drop_duplicates(subset=['代號'])
             
-            # 💡 記憶體救星：轉為 float32，丟棄肥大的字串
             val_series = day_df['外資持股(%)'].astype(str).str.replace('%', '', regex=False).str.replace(',', '', regex=False)
             day_df[f'外資持股_{date_str}'] = pd.to_numeric(val_series, errors='coerce').fillna(0.0).astype('float32')
             
@@ -92,7 +91,6 @@ def fetch_github_json_all():
                 df = df.rename(columns={'three_inst_ratio': '法人持股', 'change': f'{d}日ΔChange'})
                 df[f'{d}日排名'] = (df.index + 1).astype('int16') 
                 
-                # 轉為數值型態
                 df['法人持股'] = pd.to_numeric(df['法人持股'], errors='coerce').fillna(0.0).astype('float32')
                 df[f'{d}日ΔChange'] = pd.to_numeric(df[f'{d}日ΔChange'], errors='coerce').fillna(0.0).astype('float32')
                 json_dfs[d] = df[['股票代號', '股票名稱', '法人持股', f'{d}日ΔChange', f'{d}日排名']]
@@ -121,9 +119,9 @@ def extract_date_from_filename(filename):
 
 @st.cache_data(show_spinner=False, ttl=300)
 def build_block1_master_df(data_dir):
-    """合併所有歷史快照與 GitHub 即時數據 (極限瘦身版)"""
+    """合併所有歷史快照與 GitHub 即時數據 (極限瘦身版 + 排名追蹤)"""
     date_files = defaultdict(lambda: {'txt': [], 'csv': []})
-    all_csv_files = glob.glob(os.path.join(data_dir, "*JSON*.csv"))
+    all_csv_files = glob.glob(os.path.join(data_dir, "*JSON_History.csv"))
     
     for f in all_csv_files:
         d_label = extract_date_from_filename(os.path.basename(f))
@@ -164,7 +162,6 @@ def build_block1_master_df(data_dir):
                 
         if f_df is not None and not f_df.empty:
             d_cols = sorted([c for c in f_df.columns if '持股%' in c], reverse=True)
-            # 💡 核心優化：保留為 float32，絕對不要轉成字串 "未進榜"
             for c in d_cols: f_df[c] = pd.to_numeric(f_df[c], errors='coerce').fillna(0.0).astype('float32')
                 
             def generate_tags(sections):
@@ -222,10 +219,56 @@ def build_block1_master_df(data_dir):
                     temp_json = j_dfs[d][['股票代號', f'{d}日ΔChange', f'{d}日排名']]
                     f_df = pd.merge(f_df, temp_json, on='股票代號', how='left')
 
+            # 🚀 尋找「前一個交易日」的 master_features 來抓取前一日排名 (支援前台顯示△排名)
+            today_str = datetime.datetime.now().strftime("%Y%m%d")
+            master_files = glob.glob(os.path.join(data_dir, "*master_features*.parquet")) + glob.glob(os.path.join(data_dir, "*master_features*.csv"))
+            master_files = sorted(master_files, key=lambda x: extract_date_from_filename(os.path.basename(x)) or "00000000", reverse=True)
+            
+            # 抓比今天日期小的最新檔案 (也就是昨天的 master 檔)
+            prev_mf = next((f for f in master_files if extract_date_from_filename(os.path.basename(f)) and extract_date_from_filename(os.path.basename(f)) < today_str), None)
+            
+            df_prev_ranks = pd.DataFrame(columns=['股票代號'])
+            if prev_mf:
+                try:
+                    df_prev = pd.read_parquet(prev_mf) if prev_mf.endswith('.parquet') else pd.read_csv(prev_mf, dtype=str)
+                    code_col = 'stock_code' if 'stock_code' in df_prev.columns else ('統一代號' if '統一代號' in df_prev.columns else None)
+                    if code_col:
+                        rank_cols = [code_col] + [f'B1_{d}日排名' for d in [5, 20, 60, 120] if f'B1_{d}日排名' in df_prev.columns]
+                        df_prev_ranks = df_prev[rank_cols].copy()
+                        df_prev_ranks = df_prev_ranks.rename(columns={code_col: '股票代號'})
+                        df_prev_ranks['股票代號'] = df_prev_ranks['股票代號'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.zfill(4)
+                        df_prev_ranks = df_prev_ranks.rename(columns={f'B1_{d}日排名': f'{d}日前一日排名' for d in [5, 20, 60, 120]})
+                except Exception: pass
+                
+            if not df_prev_ranks.empty:
+                f_df = pd.merge(f_df, df_prev_ranks, on='股票代號', how='left')
+                
+            for d in [5, 20, 60, 120]:
+                col_today = f'{d}日排名'
+                col_yest = f'{d}日前一日排名'
+                col_delta = f'{d}日△排名'
+                
+                if col_today not in f_df.columns: f_df[col_today] = np.nan
+                if col_yest not in f_df.columns: f_df[col_yest] = np.nan
+                
+                f_df[col_today] = pd.to_numeric(f_df[col_today], errors='coerce')
+                f_df[col_yest] = pd.to_numeric(f_df[col_yest], errors='coerce')
+                
+                def calc_rank_delta_front(row):
+                    t = row[col_today]
+                    y = row[col_yest]
+                    if pd.isna(t): return "-"
+                    if pd.isna(y): return "🆕 新進榜"
+                    diff = y - t
+                    if diff > 0: return f"🔺 +{int(diff)}"
+                    elif diff < 0: return f"🔻 {int(diff)}"
+                    else: return "➖ 0"
+                    
+                f_df[col_delta] = f_df.apply(calc_rank_delta_front, axis=1)
+
             col_ref = f_df.set_index('股票代號')['上榜數量'].to_dict()
             f_df['今日有上榜_排序'] = f_df['今日上榜'].astype(str) != ""
             
-            # 確保代號與名稱轉為 Category 節省空間
             f_df['股票代號'] = f_df['股票代號'].astype('category')
             f_df['股票名稱'] = f_df['股票名稱'].astype('category')
             
@@ -516,7 +559,6 @@ def render_b1_main_tables(final_df, color_ref, date_cols):
         df = final_df[final_df['今日上榜'].astype(str).str.contains(f'{target_day_str}日', na=False)].copy()
         if df.empty: return df
         
-        # 💡 將 Category 轉為字串做條件篩選
         code_str = df['股票代號'].astype(str)
         is_bond = code_str.str.endswith('B')
         is_etf = (code_str.str.len() >= 5) & (~is_bond)
@@ -531,13 +573,11 @@ def render_b1_main_tables(final_df, color_ref, date_cols):
         rank_col = f'{target_day_str}日排名'
         change_col = f'{target_day_str}日ΔChange'
         
-        # 💡 現在 △ 是乾淨的 float32，直接排序！
         df = df.sort_values(by='△', ascending=False)
         
         if rank_col not in df.columns:
             df[f'{target_day_str}日排名'] = range(1, len(df) + 1)
             
-        # 💡 只有在顯示層才套用排版字串
         df['法人持股'] = df['法人持股'].apply(lambda x: f"{x:.2f}%" if x > 0 else None)
         df['△'] = df['△'].apply(format_delta)
         if change_col in df.columns: 
@@ -547,22 +587,23 @@ def render_b1_main_tables(final_df, color_ref, date_cols):
         df['最新動態'] = df['最新動態'].astype(str).replace("nan", "⚪ 尚無比對紀錄")
         return df
 
+    # 🚀 在前端的 display_cols 中加入剛算好的 △排名 欄位
     with tab5:
         df_5 = get_local_tab_df(5)
-        display_cols = ['5日排名', '股票代號', '股票名稱', '法人持股', '△', '5日ΔChange', '法人金額', '最新動態', '今日上榜']
+        display_cols = ['5日排名', '5日△排名', '股票代號', '股票名稱', '法人持股', '△', '5日ΔChange', '法人金額', '最新動態', '今日上榜']
         if not df_5.empty: st.dataframe(df_5[[c for c in display_cols if c in df_5.columns]], use_container_width=True, hide_index=True)
         else: st.info("⚪ 尚無 5日進榜數據。")
     with tab20:
         df_20 = get_local_tab_df(20)
-        display_cols = ['20日排名', '股票代號', '股票名稱', '法人持股', '△', '20日ΔChange', '法人金額', '最新動態', '今日上榜']
+        display_cols = ['20日排名', '20日△排名', '股票代號', '股票名稱', '法人持股', '△', '20日ΔChange', '法人金額', '最新動態', '今日上榜']
         if not df_20.empty: st.dataframe(df_20[[c for c in display_cols if c in df_20.columns]], use_container_width=True, hide_index=True)
     with tab60:
         df_60 = get_local_tab_df(60)
-        display_cols = ['60日排名', '股票代號', '股票名稱', '法人持股', '△', '60日ΔChange', '法人金額', '最新動態', '今日上榜']
+        display_cols = ['60日排名', '60日△排名', '股票代號', '股票名稱', '法人持股', '△', '60日ΔChange', '法人金額', '最新動態', '今日上榜']
         if not df_60.empty: st.dataframe(df_60[[c for c in display_cols if c in df_60.columns]], use_container_width=True, hide_index=True)
     with tab120:
         df_120 = get_local_tab_df(120)
-        display_cols = ['120日排名', '股票代號', '股票名稱', '法人持股', '△', '120日ΔChange', '法人金額', '最新動態', '今日上榜']
+        display_cols = ['120日排名', '120日△排名', '股票代號', '股票名稱', '法人持股', '△', '120日ΔChange', '法人金額', '最新動態', '今日上榜']
         if not df_120.empty: st.dataframe(df_120[[c for c in display_cols if c in df_120.columns]], use_container_width=True, hide_index=True)
             
     with tab_all:

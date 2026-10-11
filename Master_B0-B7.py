@@ -1,4 +1,4 @@
-# master_etl_pipeline.py (B0-B7 完全體版 - 修復日期對齊 Bug)
+# master_etl_pipeline.py (B0-B7 完全體版 - 排名動態追蹤升級)
 import pandas as pd
 import numpy as np
 import os
@@ -77,7 +77,7 @@ def process_b0_features(DATA_DIR, OUTPUT_DIR):
     
     latest_date = unique_dates[0]
     
-    # 🎯 智慧日期轉換：將 '10/05' 轉為 '20261005' 徹底解決檔名對不齊的問題
+    # 🎯 智慧日期轉換
     clean_date = latest_date.replace('/', '').replace('-', '')
     if len(clean_date) == 4:
         target_date = str(datetime.datetime.now().year) + clean_date
@@ -117,7 +117,7 @@ def process_b0_features(DATA_DIR, OUTPUT_DIR):
     ratio = tdy_vol / avg_v.replace(0, np.nan)
     v_s = np.select([ratio >= 1.5, ratio <= 0.7], ["放量", "縮量"], default="平量")
     p_s = np.select([tdy_pct >= 4.0, tdy_pct > 1.5, tdy_pct >= -1.5, tdy_pct > -4.0], ["大漲", "價升", "滯漲", "小跌"], default="大跌")
-    status_map = {"放量大漲":"🚀 放量大漲", "縮量大漲":"🔒 縮量大漲", "平量大漲":"✈️ 平量大漲", "縮量價升":"📈 價升量縮", "放量滯漲":"⚠️ 放量滯漲", "平量滯漲":"⏸ 平量滯漲", "縮量小跌":"📉 縮量小跌", "放量小跌":"🛡️ 放量小跌", "平量小跌":"🥀 平量價縮", "縮量大跌":"☠️️ 縮量大跌", "放量大跌":"🩸 放量大跌", "平量大跌":"🕳 平量大跌"}
+    status_map = {"放量大漲":"🚀 放量大漲", "縮量大漲":"🔒 縮量大漲", "平量大漲":"✈️ 平量大漲", "縮量價升":"📈 價升量縮", "放量滯漲":"⚠️ 放量滯漲", "平量滯漲":"⏸ 平量滯漲", "縮量小跌":"📉 縮量小跌", "放量小跌":"🛡️ 放量小跌", "平量小跌":"🥀 平量價縮", "縮量大跌":"☠ 縮量大跌", "放量大跌":"🩸 放量大跌", "平量大跌":"🕳 平量大跌"}
     df_today['B0_量價狀態'] = pd.Series(v_s + p_s).map(status_map).fillna("⚖ 溫和震盪整理").values
 
     t_amt, m5, m10, m20 = df_today['今日成交額(萬)'].fillna(0), df_today['5日均額(萬)'].fillna(0), df_today['10日均額(萬)'].fillna(0), df_today['20日均額(萬)'].fillna(0)
@@ -207,7 +207,6 @@ def process_b1_features(DATA_DIR, target_date):
     master_b1['B1_負向上榜區塊'] = master_b1.get('B1_負向上榜區塊', pd.Series(dtype=str)).fillna("")
     master_b1['B1_總法人持股(%)'] = master_b1.get('B1_正向_法人持股(%)', pd.Series(dtype=float)).combine_first(master_b1.get('B1_衰退_法人持股(%)', pd.Series(dtype=float)))
     
-    # 🛑 精準過濾 NaN 防呆相減
     yesterday_holding = master_b1.get('持股%_1', pd.Series(np.nan, index=master_b1.index)).combine_first(
         master_b1.get('B1_衰退_法人持股(%)_T1', pd.Series(np.nan, index=master_b1.index))
     )
@@ -231,6 +230,52 @@ def process_b1_features(DATA_DIR, target_date):
         if d in json_dfs and not json_dfs[d].empty: master_b1 = pd.merge(master_b1, json_dfs[d], on='stock_code', how='left')
         else: master_b1[f'B1_{d}日△Change'] = master_b1[f'B1_{d}日排名'] = np.nan
 
+    # 🚀 尋找「前一個交易日」的 master_features 來抓取前一日排名
+    prev_files = sorted([f for f in glob.glob(os.path.join(DATA_DIR, "*master_features*.parquet")) + glob.glob(os.path.join(DATA_DIR, "*master_features*.csv")) 
+                         if extract_date_from_name(os.path.basename(f)) < target_date], key=lambda x: extract_date_from_name(os.path.basename(x)), reverse=True)
+    
+    df_prev_ranks = pd.DataFrame(columns=['stock_code'])
+    if prev_files:
+        try:
+            f_prev = prev_files[0]
+            df_prev = pd.read_parquet(f_prev) if f_prev.endswith('.parquet') else pd.read_csv(f_prev, dtype=str)
+            code_col = 'stock_code' if 'stock_code' in df_prev.columns else ('統一代號' if '統一代號' in df_prev.columns else None)
+            
+            if code_col:
+                rank_cols = [code_col] + [f'B1_{d}日排名' for d in [5, 20, 60, 120] if f'B1_{d}日排名' in df_prev.columns]
+                df_prev_ranks = df_prev[rank_cols].copy()
+                df_prev_ranks = df_prev_ranks.rename(columns={code_col: 'stock_code'})
+                df_prev_ranks['stock_code'] = df_prev_ranks['stock_code'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.zfill(4)
+                df_prev_ranks = df_prev_ranks.rename(columns={f'B1_{d}日排名': f'B1_{d}日前一日排名' for d in [5, 20, 60, 120]})
+        except Exception: pass
+
+    if not df_prev_ranks.empty:
+        master_b1 = pd.merge(master_b1, df_prev_ranks, on='stock_code', how='left')
+
+    # 🚀 計算最新的 B1_X日△排名
+    for d in [5, 20, 60, 120]:
+        col_today = f'B1_{d}日排名'
+        col_yest = f'B1_{d}日前一日排名'
+        col_delta = f'B1_{d}日△排名'
+        
+        if col_today not in master_b1.columns: master_b1[col_today] = np.nan
+        if col_yest not in master_b1.columns: master_b1[col_yest] = np.nan
+        
+        master_b1[col_today] = pd.to_numeric(master_b1[col_today], errors='coerce')
+        master_b1[col_yest] = pd.to_numeric(master_b1[col_yest], errors='coerce')
+        
+        def calc_b1_rank_delta(row):
+            t = row[col_today]
+            y = row[col_yest]
+            if pd.isna(t): return "-" # 本日未進榜
+            if pd.isna(y): return "🆕 新進榜" # 昨天沒進榜，今天進榜
+            diff = y - t # 排名數字變小表示上升 (例如昨5 今2 -> 5-2 = +3)
+            if diff > 0: return f"🔺 +{int(diff)}"
+            elif diff < 0: return f"🔻 {int(diff)}"
+            else: return "➖ 0"
+            
+        master_b1[col_delta] = master_b1.apply(calc_b1_rank_delta, axis=1)
+
     if 'B1_外資持有(千張)' in master_b1.columns and 'B1_外資持股(%)' in master_b1.columns:
         master_b1['估算總發行張數'] = np.where(master_b1['B1_外資持股(%)'] > 0, (master_b1['B1_外資持有(千張)'] * 1000) / (master_b1['B1_外資持股(%)'] / 100), np.nan)
 
@@ -239,8 +284,6 @@ def process_b1_features(DATA_DIR, target_date):
     cols_drop = [c for c in d_cols if c != 'B1_正向_法人持股(%)'] + ['區塊_1', '區塊_2', '區塊_3', 'B1_衰退_法人持股(%)_T1', 'B1_總法人持股(%)_T1', 'B1_外資持股(%)_T1']
     master_b1.drop(columns=[c for c in cols_drop if c in master_b1.columns], inplace=True)
     return master_b1
-
-
 # ==========================================
 # 模組三：B2/B3 法人佔比與連續買賣運算 (嚴格對齊時間)
 # ==========================================
