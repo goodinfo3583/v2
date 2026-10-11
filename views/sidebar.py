@@ -990,9 +990,7 @@ def render_sidebar_war_room(STOCK_DICT, DATA_DIR="data"):
         c_search, c_btn_go, c_btn_clear = st.columns([6, 1.5, 1.5])
         
         stock_options = []
-        if STOCK_DICT:
-            # 暫時加這行印在畫面上測試
-            st.write("測試 00919 是否存在字典：", STOCK_DICT.get("00919", "找不到該代碼！"))
+        if STOCK_DICT:           
             # ✅ 修正：將 <= 4 改為 <= 6，以支援如 00981A 等 ETF 標的
             unique_options = {f"{str(v['id']).strip()} {v['name']}" for v in STOCK_DICT.values() if len(str(v['id']).strip()) <= 6}
             stock_options = sorted(list(unique_options))
@@ -1000,20 +998,31 @@ def render_sidebar_war_room(STOCK_DICT, DATA_DIR="data"):
         # ====== 🌟 新增：讀取本地 ETF txt 檔案並合併至選單 ======
         etf_file_path = os.path.join(DATA_DIR, "本國ETF證券辨識號碼一覽表.txt")
         if os.path.exists(etf_file_path):
-            try:
-                with open(etf_file_path, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-                    # 從第 3 行開始讀取（跳過「20261011更新」與「ETF代號 ETF名稱」兩行表頭）
-                    for line in lines[2:]: 
-                        parts = line.strip().split()
-                        if len(parts) >= 2:
-                            # 將 ETF 代號與名稱組合後加入選單
-                            stock_options.append(f"{parts[0]} {parts[1]}")
-                
+            read_success = False
+            # 嘗試多種編碼，破解 Windows 記事本存檔的編碼問題
+            for enc in ['utf-8', 'utf-8-sig', 'big5', 'cp950']:
+                try:
+                    with open(etf_file_path, "r", encoding=enc) as f:
+                        lines = f.readlines()
+                        # 從第 3 行開始讀取（跳過「20261011更新」與「ETF代號 ETF名稱」兩行表頭）
+                        for line in lines[2:]: 
+                            parts = line.strip().split()
+                            if len(parts) >= 2:
+                                # 將 ETF 代號與名稱組合後加入選單
+                                stock_options.append(f"{parts[0]} {parts[1]}")
+                    read_success = True
+                    break  # 成功讀取就跳出迴圈
+                except Exception:
+                    continue  # 這個編碼失敗，換下一個試試看
+            
+            if read_success:
                 # 重新去重並排序，讓 ETF 完美融入下拉選單
                 stock_options = sorted(list(set(stock_options)))
-            except Exception as e:
-                pass
+            else:
+                st.error("⚠️ ETF 檔案讀取失敗：請確認檔案是否為純文字格式。")
+        else:
+            # 如果連檔案都找不到，直接顯示真實路徑讓你好除錯
+            st.warning(f"⚠️ 找不到 ETF 檔案，請確認檔案是否放在：{os.path.abspath(etf_file_path)}")
         # ========================================================
             
         with c_search:
