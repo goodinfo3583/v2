@@ -413,20 +413,41 @@ def render(STOCK_DICT=None):
             if len(stock_id) <= 6:
                 full_name_dict[stock_id] = v.get('name', '-')
                 
-    # 2. 疊加 ETF 名稱字典 (無敵解碼版)
+    # 2. 疊加 ETF 名稱字典 (無敵解碼+多檔名防呆版)
     import os
-    etf_file_path = os.path.join("data", "本國ETF證券辨識號碼一覽表_2.txt")
-    if os.path.exists(etf_file_path):
+    # 自動偵測檔名，避免改名後找不到
+    possible_names = ["本國ETF證券辨識號碼一覽表_2.txt", "本國ETF證券辨識號碼一覽表.txt"]
+    etf_file_path = None
+    for name in possible_names:
+        p = os.path.join("data", name)
+        if os.path.exists(p):
+            etf_file_path = p
+            break
+            
+    if etf_file_path:
+        read_success = False
         for enc in ['utf-8', 'utf-8-sig', 'utf-16', 'utf-16le', 'big5', 'cp950']:
             try:
+                temp_dict = {}
                 with open(etf_file_path, "r", encoding=enc) as f:
                     for line in f:
                         parts = line.strip().split()
+                        # 確保至少有兩欄，且第一欄開頭是數字
                         if len(parts) >= 2 and parts[0][0].isdigit():
-                            full_name_dict[parts[0].strip()] = parts[1].strip()
-                break # 讀取成功就跳出迴圈
+                            temp_dict[parts[0].strip()] = parts[1].strip()
+                
+                # 必須真的有抓到超過 10 檔 ETF，才算成功解碼 (防止讀到亂碼)
+                if len(temp_dict) > 10:
+                    full_name_dict.update(temp_dict)
+                    read_success = True
+                    break 
             except Exception:
                 continue
+        
+        if not read_success:
+            st.error(f"⚠️ 找到了 ETF 檔案 ({etf_file_path})，但編碼無法解析，請用記事本打開後「另存新檔」選擇 UTF-8 編碼！")
+    else:
+        st.warning("⚠️ 找不到 ETF 檔案，請確認檔案是否已正確放入 `data` 資料夾，且檔名為上述之一。")
     # =====================================================================
     
     # ✅ 改從輕量的 df_trends_all 提取最新日期
