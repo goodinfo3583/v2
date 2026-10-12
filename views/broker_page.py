@@ -401,8 +401,33 @@ def render_broker_dashboard(target_stock, display_name, stock_raw, df_trend):
 # 🖼️ 主渲染入口更新
 # ==========================================
 def render(STOCK_DICT=None):
-    # ❌ 刪除原本的：df_raw_all = load_full_blood_broker_history()
     df_trends_all = load_stock_trends()
+    
+    # ====== 🌟 終極修正：在渲染最開頭建立「全宇宙股票+ETF名稱字典」 ======
+    full_name_dict = {}
+    
+    # 1. 載入原始股票字典 (上市櫃普通股)
+    if STOCK_DICT:
+        for k, v in STOCK_DICT.items():
+            stock_id = str(v['id']).strip()
+            if len(stock_id) <= 6:
+                full_name_dict[stock_id] = v.get('name', '-')
+                
+    # 2. 疊加 ETF 名稱字典 (無敵解碼版)
+    import os
+    etf_file_path = os.path.join("data", "本國ETF證券辨識號碼一覽表_2.txt")
+    if os.path.exists(etf_file_path):
+        for enc in ['utf-8', 'utf-8-sig', 'utf-16', 'utf-16le', 'big5', 'cp950']:
+            try:
+                with open(etf_file_path, "r", encoding=enc) as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if len(parts) >= 2 and parts[0][0].isdigit():
+                            full_name_dict[parts[0].strip()] = parts[1].strip()
+                break # 讀取成功就跳出迴圈
+            except Exception:
+                continue
+    # =====================================================================
     
     # ✅ 改從輕量的 df_trends_all 提取最新日期
     latest_date = "讀取中..."
@@ -420,8 +445,9 @@ def render(STOCK_DICT=None):
     with scan_tab1:
         df_multi = fetch_parquet_from_hf("scan_多期程主力買超統計.parquet")
         if not df_multi.empty:
-            if STOCK_DICT and '股票代號' in df_multi.columns:
-                df_multi['股票名稱'] = df_multi['股票代號'].astype(str).apply(lambda x: STOCK_DICT.get(x, {}).get('name', '-'))
+            if '股票代號' in df_multi.columns:
+                # ✅ 修正：改用 full_name_dict 來對應名稱，ETF 名字就不會變成 - 了
+                df_multi['股票名稱'] = df_multi['股票代號'].astype(str).str.strip().apply(lambda x: full_name_dict.get(x, '-'))
             
             if '統計期程' in df_multi.columns:
                 period_order = {"1日": 1, "5日": 2, "20日": 3}
@@ -456,8 +482,9 @@ def render(STOCK_DICT=None):
     with scan_tab2:
         df_tofu = fetch_parquet_from_hf("scan_依股價乖離率吃豆腐排行.parquet")
         if not df_tofu.empty:
-            if STOCK_DICT and '股票代號' in df_tofu.columns:
-                df_tofu['股票名稱'] = df_tofu['股票代號'].astype(str).apply(lambda x: STOCK_DICT.get(x, {}).get('name', '-'))
+            if '股票代號' in df_tofu.columns:
+                # ✅ 修正：改用 full_name_dict 來對應名稱
+                df_tofu['股票名稱'] = df_tofu['股票代號'].astype(str).str.strip().apply(lambda x: full_name_dict.get(x, '-'))
                 cols = df_tofu.columns.tolist()
                 if '股票名稱' in cols:
                     cols.insert(cols.index('股票代號')+1, cols.pop(cols.index('股票名稱')))
@@ -484,8 +511,9 @@ def render(STOCK_DICT=None):
     df_momentum = fetch_parquet_from_hf("momentum_latest.parquet")
 
     if not df_momentum.empty:
-        if STOCK_DICT and '股票代號' in df_momentum.columns:
-            df_momentum['股票名稱'] = df_momentum['股票代號'].astype(str).apply(lambda x: STOCK_DICT.get(x, {}).get('name', '-'))
+        if '股票代號' in df_momentum.columns:
+            # ✅ 修正：改用 full_name_dict 來對應名稱
+            df_momentum['股票名稱'] = df_momentum['股票代號'].astype(str).str.strip().apply(lambda x: full_name_dict.get(x, '-'))
         
         # 💡 自動偵測後台是否有算出 10/20/30 日的欄位，不再依賴容易出錯的 meta.txt
         tabs_names = ["🔹 單日集中度 Δ", "🔹 5日集中度 Δ"]
@@ -542,40 +570,14 @@ def render(STOCK_DICT=None):
             tab_idx += 1
     else:
         st.info("動能資料載入中或後台尚未產出今日資料。")
+        
     # 個股查詢
     st.markdown("---")
     st.markdown("### 🔍 個股查詢與走勢圖")
-    stock_options = []
-    if STOCK_DICT:
-        # ✅ 將 <= 4 改為 <= 6，並加上 .strip() 確保沒有隱藏空白
-        unique_options = {f"{str(v['id']).strip()} {v['name']}" for v in STOCK_DICT.values() if len(str(v['id']).strip()) <= 6}
-        stock_options = sorted(list(unique_options))
-
-    # ====== 🌟 新增：讓 broker_page 也能讀取 ETF txt 檔案 (無敵解碼版) ======
-    import os
-    # 確保路徑指向 data 資料夾內的正確檔名
-    etf_file_path = os.path.join("data", "本國ETF證券辨識號碼一覽表_2.txt")
     
-    if os.path.exists(etf_file_path):
-        read_success = False
-        for enc in ['utf-8', 'utf-8-sig', 'utf-16', 'utf-16le', 'big5', 'cp950']:
-            try:
-                with open(etf_file_path, "r", encoding=enc) as f:
-                    for line in f:
-                        parts = line.strip().split()
-                        # 自動過濾：至少要有兩欄，且第一欄必須是數字開頭
-                        if len(parts) >= 2 and parts[0][0].isdigit():
-                            stock_options.append(f"{parts[0]} {parts[1]}")
-                read_success = True
-                break
-            except Exception:
-                continue
-        
-        if read_success:
-            stock_options = sorted(list(set(stock_options)))
-        else:
-            st.error("⚠️ ETF 檔案讀取失敗：編碼無法解析。")
-    # ========================================================
+    # ✅ 修正：直接使用一開始建立的 full_name_dict 來產生選單，程式碼變超短！
+    stock_options = [f"{k} {v}" for k, v in full_name_dict.items()]
+    stock_options = sorted(list(set(stock_options)))
 
     col1, col2 = st.columns([3, 1])
     with col1:
