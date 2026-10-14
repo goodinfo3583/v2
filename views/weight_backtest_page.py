@@ -17,6 +17,22 @@ def fetch_parquet_from_hf(file_name):
     try: return pd.read_parquet(url)
     except Exception: return pd.DataFrame()
 
+# ==========================================
+# 🌟 讀取 Master Features Parquet (供 B0~B7 全新過濾使用)
+# ==========================================
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_master_features():
+    file_path = "20261013_master_features.parquet"
+    if os.path.exists(file_path):
+        df = pd.read_parquet(file_path)
+        # 統一清理代號格式
+        if 'stock_code' in df.columns:
+            df['統一代號'] = df['stock_code'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+        elif '股票代號' in df.columns:
+            df['統一代號'] = df['股票代號'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+        return df
+    return pd.DataFrame()
+
 try: from views.b0_page import sync_b0_data
 except ImportError:
     def sync_b0_data(DATA_DIR): pass
@@ -67,7 +83,6 @@ def clean_stock_id(df):
     return df
 
 def get_df(primary_key):
-    """自動執行資料清洗與統一代號生成的萬能鑰匙"""
     for k in KEY_MAP.get(primary_key, [primary_key]):
         df = st.session_state.get(k)
         if isinstance(df, pd.DataFrame) and not df.empty:
@@ -75,10 +90,9 @@ def get_df(primary_key):
     return pd.DataFrame()
 
 # ==========================================
-# 🚀 局部渲染魔法 1：除錯透視鏡 (避免龐大合併卡死畫面)
+# 🚀 局部渲染魔法 1：除錯透視鏡 (保留原始功能)
 # ==========================================
 def merge_debug_data(base_df, source_df, col_map, prefix=""):
-    """合併小幫手：專門處理 B0~B8 冗長的資料合併與欄位改名"""
     if source_df.empty: return base_df
     rename_dict = {k: f"{prefix}{v}" for k, v in col_map.items() if k in source_df.columns}
     if not rename_dict: return base_df
@@ -177,7 +191,7 @@ def render_debug_panel(filtered_df, any_filter_applied, dynamic_price_col_b6):
         st.info("👆 請在上方展開模組中至少設定一項條件，目前預設顯示全市場標的。")
 
 # ==========================================
-# 🚀 局部渲染魔法 2：計分展示與寫入功能 (避免打勾時全頁重整)
+# 🚀 局部渲染魔法 2：計分展示與寫入功能
 # ==========================================
 @st.fragment
 def render_result_and_save_panel():
@@ -280,6 +294,31 @@ def render_result_and_save_panel():
 
 
 # ==========================================
+# 🌟 動態過濾器 UI 渲染引擎 (B0 ~ B7)
+# ==========================================
+def render_dynamic_column_filter(df, col, prefix, active_dynamic_filters):
+    """依照欄位屬性(數值 or 類別)自動生成過濾 UI，並將結果存入 active_dynamic_filters"""
+    st.markdown(f"**{col}**")
+    if pd.api.types.is_numeric_dtype(df[col]):
+        c1, c2 = st.columns(2)
+        # 利用 Streamlit >= 1.25 的 value=None 特性，不強制填入數值
+        min_v = c1.number_input("最小值", value=None, key=f"dyn_filter_min_{prefix}_{col}")
+        max_v = c2.number_input("最大值", value=None, key=f"dyn_filter_max_{prefix}_{col}")
+        if min_v is not None:
+            active_dynamic_filters.append(('num_min', col, min_v))
+        if max_v is not None:
+            active_dynamic_filters.append(('num_max', col, max_v))
+    else:
+        # 類別型：拉出所有不重複的選項供多選
+        uniq_vals = [x for x in df[col].dropna().unique() if str(x).strip() != '']
+        uniq_vals = sorted(list(set(str(x) for x in uniq_vals)))
+        sel_v = st.multiselect("選擇符合的條件：", uniq_vals, key=f"dyn_filter_in_{prefix}_{col}")
+        if sel_v:
+            active_dynamic_filters.append(('cat_in', col, sel_v))
+    st.write("---")
+
+
+# ==========================================
 # 🌟 主程式 Entry Point
 # ==========================================
 def show_weight_backtest_page(STOCK_DICT, DATA_DIR="data"):
@@ -303,7 +342,9 @@ def show_weight_backtest_page(STOCK_DICT, DATA_DIR="data"):
     st.caption("打造專屬於自己的選股邏輯，透過多重條件交集或聯集與大數據計分，找出最具爆發力的潛力股。")
     st.write("---")
 
-    # 0. 建立完美全市場候選池
+    # 0. 載入全域 Parquet 檔案與建立候選池
+    master_df = load_master_features()
+
     pool_dict = {}
     if STOCK_DICT:
         for v in STOCK_DICT.values():
@@ -318,159 +359,169 @@ def show_weight_backtest_page(STOCK_DICT, DATA_DIR="data"):
     base_df = pd.DataFrame(list(pool_dict.values()))
     if base_df.empty: return st.warning("⚠️ 無法建立候選池，請確認資料庫狀態。")
 
-    # 1. 第一關：過濾器面版
+    # ==========================================
+    # 1. 第一關：嚴格過濾器面板 (重構區)
+    # ==========================================
     col_title, col_reset = st.columns([3, 1])
     with col_title: st.markdown(f"#### 1️⃣ 設定嚴格過濾條件 (目前總候選池共 {len(base_df)} 檔)")
+    
     with col_reset:
-        def reset_filters():            
-            # 加入 'b6_amt_min' 到數值型歸零清單
-            for k in ['b0_vol', 'b0_amt', 'b0_per', 'b0_explode_ratio', 'b8_day_streak', 'b8_week_streak', 'b8_buy_vol_min', 'b8_top15_money', 'b8_tofu_money', 'b6_amt_min']: 
-                st.session_state[f'filter_{k}'] = 0
+        def reset_filters():
+            # 清除所有動態生成的過濾器 key
+            for key in list(st.session_state.keys()):
+                if key.startswith("dyn_filter_"):
+                    del st.session_state[key]
             
-            # 使用字典明確指定每一個 Slider 的正確預設區間，避免超出邊界 (StreamlitValueBelowMinError)
-            slider_defaults = {
-                'filter_b0_price': (0.0, 25000.0),
-                'filter_b0_pct': (-10.0, 10.0),
-                'filter_b1_ratio': (0.0, 100.0),
-                'filter_b1_5d_chg': (-100.0, 100.0),
-                'filter_b1_20d_chg': (-100.0, 100.0),
-                'filter_b1_60d_chg': (-100.0, 100.0),
-                'filter_b1_120d_chg': (-100.0, 100.0),
-                'filter_b4_price_chg': (-10.0, 10.0),
-                'filter_b7_hold_pct': (0.0, 100.0),
-                'filter_b7_pledge_pct': (0.0, 100.0),
-                'filter_b8_tofu_bias': (-30.0, 30.0)
-            }
-            for k, v in slider_defaults.items():
-                st.session_state[k] = v
-                
-            for k in ['b1_radio', 'b2_radio', 'b3_radio', 'b4_radio']: 
-                st.session_state[f'filter_{k}'] = "交集 (必須同時符合勾選的所有特徵)"
-                
-            for k in ['b1_delta', 'b1_5d', 'b1_20d', 'b1_60d', 'b1_120d', 'b2_1', 'b2_2', 'b2_3', 'b2_4', 'b3_fo_day', 'b3_it_day', 'b3_fo_wk', 'b3_it_wk', 'b6_today', 'b7_6m_inc', 'b8_mom_slope'] + [f'b4_{x}' for x in ['pct_41', 'vol_41', 'pct_42', 'vol_42', 'pct_43', 'vol_43', 'pct_inc_margin', 'pct_inc_short', 'amt_short_dec', 'amt_short_inc', 'acc_margin_dec', 'acc_sbl_dec', 'acc_margin_inc', 'acc_sbl_inc']] + [f'b5_{x}' for x in ['long_short', 'double', '6w_1000', '6w_800', '6w_600', '6w_400']]: 
-                st.session_state[f'filter_{k}'] = False
-                
-            for k in ['b0_vp_status', 'b0_fund_trend', 'b1_multi', 'b2_multi', 'b3_multi', 'b4_multi', 'b5_trend_1000', 'b5_trend_800', 'b5_trend_600', 'b5_trend_400', 'b6_status', 'b7_hold_trend', 'b7_pledge_trend', 'b8_top15_trend', 'b8_tofu_trend', 'b8_mom_period', 'b8_mom_trend']: 
+            # 清除 B8 特定過濾器與原始架構的其他殘留
+            for k in ['b8_day_streak', 'b8_top15_money', 'b8_tofu_money']: 
+                st.session_state[f'filter_{k}'] = 0
+            st.session_state['filter_b8_tofu_bias'] = (-30.0, 30.0)
+            st.session_state['filter_b8_mom_logic'] = "交集 (必須同時符合勾選期程)"
+            for k in ['b8_tofu_trend', 'b8_mom_period', 'b8_mom_trend']: 
                 st.session_state[f'filter_{k}'] = []
-                
-            st.session_state['filter_b2_top_n'] = st.session_state['filter_b4_top_n'] = 50
+            st.session_state['filter_b8_mom_slope'] = False
+            
         st.button("清空過濾條件", icon=":material/ink_eraser:", on_click=reset_filters, use_container_width=True)
 
     filtered_df = base_df.copy()
     any_filter_applied = False
+    
+    # 準備蒐集所有區塊動態觸發的條件: list of tuple ('num_min'/'num_max'/'cat_in', col_name, value)
+    active_dynamic_filters = []
 
-    # --- 模組 B0 ---
+    if master_df.empty:
+        st.warning("⚠️ 找不到 20261013_master_features.parquet，動態過濾功能無法完全啟用。")
+
+    # --- 取出日期的字串 (用於維持版面標題一致性) ---
     df_b0 = get_df('b0_price')
-    b0_latest_date_str = "未知日期"
+    b0_latest_date_str = "2026/10/13"
     if not df_b0.empty and '股價日期' in df_b0.columns:
         date_raw = str(df_b0['股價日期'].iloc[0]).strip()
         parts = date_raw.replace("-", "/").split("/")
         b0_latest_date_str = f"2026/{parts[0].zfill(2)}/{parts[1].zfill(2)}" if len(parts) == 2 else (pd.to_datetime(date_raw).strftime("%Y/%m/%d") if pd.to_datetime(date_raw).year >= 2000 else f"2026/{pd.to_datetime(date_raw).strftime('%m/%d')}")
 
-    with st.expander(f"💰 B0 量價掃描過濾 (資料基準日: {b0_latest_date_str})", expanded=False):
-        c1, c2 = st.columns(2)
-        b0_vol_min = c1.number_input("📈 當日成交張數大於 (張)：", 0, value=0, step=500, key="filter_b0_vol")
-        b0_amt_min = c2.number_input("💵 當日成交額大於 (百萬)：", 0.0, value=0.0, step=50.0, key="filter_b0_amt")
-        c3, c4 = st.columns(2)
-        b0_price_range = c3.slider("🎯 股價區間 (元)：", 0.0, 25000.0, (0.0, 25000.0), 10.0, key="filter_b0_price")
-        b0_pct_range = c4.slider("🚀 當日漲跌幅區間 (%)：", -10.0, 10.0, (-10.0, 10.0), 0.5, key="filter_b0_pct")
-        c5, c6 = st.columns(2)
-        b0_per_max = c5.number_input("⚖️ 本益比 (PER) 小於：", 0.0, value=0.0, step=5.0, key="filter_b0_per")
-        b0_exclude_loss = c6.checkbox("🚫 排除虧損公司", key="filter_b0_exclude_loss")
-        b0_vp_status = st.multiselect("🎯 可複選量價型態：", ["🚀 放量大漲", "🔒 縮量大漲", "✈️ 平量大漲", "📈 價升量縮", "⚠️ 放量滯漲", "⏸️ 平量滯漲", "📉 縮量小跌", "🛡️ 放量小跌", "🥀 平量價縮", "☠️ 縮量大跌", "🩸 放量大跌", "🕳️ 平量大跌"], key="filter_b0_vp_status")
-        c7, c8 = st.columns(2)
-        b0_explode_ratio = c7.number_input("🚀 今日成交額大於【5日均額】的倍數：", 0.0, value=0.0, step=0.5, key="filter_b0_explode_ratio")
-        b0_fund_trend = c8.multiselect("📈 資金延續狀態：", ["🔥 資金湧入 (延續性強)", "⚡ 單日點火 (需觀察)", "💧 資金退潮 (動能弱)", "⚖️ 震盪換手"], key="filter_b0_fund_trend")
+    b1_latest_date_str = f"{str(st.session_state.get('b1_sorted_dates', ['00000000'])[0])[:4]}/{str(st.session_state.get('b1_sorted_dates', ['00000000'])[0])[4:6]}/{str(st.session_state.get('b1_sorted_dates', ['00000000'])[0])[6:]}" if st.session_state.get('b1_sorted_dates') else "2026/10/13"
     
-    # --- 模組 B1 ---
-    df_b1_raw = get_df('b1_final_df')
-    b1_latest_date_str = f"{str(st.session_state.get('b1_sorted_dates', ['00000000'])[0])[:4]}/{str(st.session_state.get('b1_sorted_dates', ['00000000'])[0])[4:6]}/{str(st.session_state.get('b1_sorted_dates', ['00000000'])[0])[6:]}" if st.session_state.get('b1_sorted_dates') else "未知日期"
-    with st.expander(f"📈 B1 法人動向過濾 (資料基準日: {b1_latest_date_str})", expanded=False):
-        c1, c2, c3, c4, c5 = st.columns(5)
-        b1_delta, b1_5d, b1_20d, b1_60d, b1_120d = c1.checkbox("當日△上升 (>0)", key="filter_b1_delta"), c2.checkbox("🔴 5日上榜", key="filter_b1_5d"), c3.checkbox("🟡 20日上榜", key="filter_b1_20d"), c4.checkbox("🟢 60日上榜", key="filter_b1_60d"), c5.checkbox("🔵 120日上榜", key="filter_b1_120d")
-        b1_ratio_min, b1_ratio_max = st.slider("法人持股比例區間 (%)：", 0.0, 100.0, (0.0, 100.0), 0.5, key="filter_b1_ratio")
-        c_chg1, c_chg2 = st.columns(2)
-        with c_chg1: b1_5d_chg, b1_60d_chg = st.slider("5日 ΔChange", -100.0, 100.0, (-100.0, 100.0), 0.5, key="filter_b1_5d_chg"), st.slider("60日 ΔChange", -100.0, 100.0, (-100.0, 100.0), 0.5, key="filter_b1_60d_chg")
-        with c_chg2: b1_20d_chg, b1_120d_chg = st.slider("20日 ΔChange", -100.0, 100.0, (-100.0, 100.0), 0.5, key="filter_b1_20d_chg"), st.slider("120日 ΔChange", -100.0, 100.0, (-100.0, 100.0), 0.5, key="filter_b1_120d_chg")
-        b1_trend_logic = st.radio("特徵篩選邏輯：", ["交集 (必須同時符合勾選的所有特徵)", "聯集 (符合其中任一特徵即可)"], horizontal=True, key="filter_b1_radio")
-        b1_trends = st.multiselect("請選擇要過濾的動態特徵：", ["📈 上升", "📉 下降", "🪜 階梯吸籌", "🛡️ 穩健吸籌", "⚠️ 趨緩", "🚀 衝進🔴5日榜單", "🚀 衝進🟡20日榜單", "🚀 衝進🟢60日榜單", "🚀 衝進🔵120日榜單"], key="filter_b1_multi")
-
-    # --- 模組 B2 ---
     b2_latest_date_str = next((c.replace("成交比%", "") for c in get_df('b2_1').columns if "成交比%" in c), "未知")
     if len(b2_latest_date_str) == 4: b2_latest_date_str = f"2026/{b2_latest_date_str[:2]}/{b2_latest_date_str[2:]}"
-    with st.expander(f"🚀 B2 法人掃貨過濾 (資料基準日: {b2_latest_date_str})", expanded=False):
-        b2_top_n = st.slider("👑 排名過濾", 10, 300, 50, 10, key="filter_b2_top_n")
-        c1, c2 = st.columns(2)
-        b2_1_chk, b2_3_chk = c1.checkbox(f"外資買超佔【5日成交量】(前 {b2_top_n} 名)", key="filter_b2_1"), c1.checkbox(f"外資買超佔【5日發行數】(前 {b2_top_n} 名)", key="filter_b2_3")
-        b2_2_chk, b2_4_chk = c2.checkbox(f"投信買超佔【5日成交量】(前 {b2_top_n} 名)", key="filter_b2_2"), c2.checkbox(f"投信買超佔【5日發行數】(前 {b2_top_n} 名)", key="filter_b2_4")
-        b2_trend_logic = st.radio("B2 特徵篩選邏輯：", ["交集 (必須同時符合勾選特徵)", "聯集 (符合任一即可)"], horizontal=True, key="filter_b2_radio")
-        b2_trend_display_map = {"🔥 強延續": "🔥 強延續", "🔥 持續加碼": "🔥 持續加碼", "🆕 今日突擊卡位": "🆕 今日突擊卡位", "⚠️ 趨緩": "⚠️ 趨緩", "🔄 持平": "🔄 持平", "🔄 今日量縮持平": "🔄 今日量縮持平", "📉 調節洗盤": "📉 調節洗盤", "💤 籌碼沉澱中": "💤 籌碼沉澱中", "🚨 轉賣反轉": "🚨 轉賣反轉", "🚨 劇烈倒貨": "🚨 劇烈倒貨", "⚪ 觀望": "⚪ 觀望"}
-        b2_trends = [raw for d in st.multiselect("可複選突擊動態：", list(b2_trend_display_map.values()), key="filter_b2_multi") for raw, desc in b2_trend_display_map.items() if d == desc]
-
-    # --- 模組 B3 ---
+    
     dates = [d for _, d in st.session_state.get('b3_data', {}).values() if d and d != "00000000"]
-    b3_latest_date_str = f"2026/{max(dates)[4:6]}/{max(dates)[6:]}" if dates else "未知日期"
-    with st.expander(f"🔥 B3 法人連買過濾 (資料基準日: {b3_latest_date_str})", expanded=False):
-        c1, c2, c3, c4 = st.columns([1.2, 1, 1.2, 1])
-        b3_fo_day_chk, b3_fo_day_n = c1.checkbox("🌐 外資日連買", key="filter_b3_fo_day"), c2.number_input("連買大於(天)", 1, value=1, step=1, key="filter_b3_fo_day_n", label_visibility="collapsed")
-        b3_it_day_chk, b3_it_day_n = c3.checkbox("🏦 投信日連買", key="filter_b3_it_day"), c4.number_input("連買大於(天)", 1, value=1, step=1, key="filter_b3_it_day_n", label_visibility="collapsed")
-        c5, c6, c7, c8 = st.columns([1.2, 1, 1.2, 1])
-        b3_fo_wk_chk, b3_fo_wk_n = c5.checkbox("🌐 外資週連買", key="filter_b3_fo_wk"), c6.number_input("連買大於(週)", 1, value=1, step=1, key="filter_b3_fo_wk_n", label_visibility="collapsed")
-        b3_it_wk_chk, b3_it_wk_n = c7.checkbox("🏦 投信週連買", key="filter_b3_it_wk"), c8.number_input("連買大於(週)", 1, value=1, step=1, key="filter_b3_it_wk_n", label_visibility="collapsed")
-        b3_trend_logic = st.radio("B3 特徵篩選邏輯：", ["交集 (必須同時符合勾選特徵)", "聯集 (符合任一即可)"], horizontal=True, key="filter_b3_radio")
-        b3_trends = [t.split(" (")[0] for t in st.multiselect("可複選連買動態：", ["🔥 波段認養 (日連買10天以上)", "⚡ 買盤點火 (日連買5~9天)", "🆕 試單觀察 (日連買1~4天)", "👑 長線主控 (週連買10週以上)", "🚀 趨勢加溫 (週連買5~9週)", "🌱 週線發動 (週連買1~4週)"], key="filter_b3_multi")]
-
-    # --- 模組 B4 ---
-    b4_latest_date_str = st.session_state.get('b4_squeeze_radar', {}).get('date', "未知日期")
-    with st.expander(f"⚔️ B4 資券動向過濾 (資料基準日: {b4_latest_date_str})", expanded=False):
-        b4_top_n = st.slider("👑 排名過濾", 10, 300, 50, 10, key="filter_b4_top_n")
-        c1, c2 = st.columns(2)
-        b4_41_pct, b4_42_pct, b4_43_pct, b4_inc_margin_pct, b4_short_dec_amt = c1.checkbox("融資減少幅度", key="filter_b4_pct_41"), c1.checkbox("借券賣出減少幅度", key="filter_b4_pct_42"), c1.checkbox("融券增加幅度", key="filter_b4_pct_43"), c1.checkbox("融資增加幅度", key="filter_b4_pct_inc_margin"), c1.checkbox("借券減少金額", key="filter_b4_amt_short_dec")
-        b4_41_vol, b4_42_vol, b4_43_vol, b4_inc_short_pct, b4_short_inc_amt = c2.checkbox("融資減少張數", key="filter_b4_vol_41"), c2.checkbox("借券賣出減少張數", key="filter_b4_vol_42"), c2.checkbox("融券增加張數", key="filter_b4_vol_43"), c2.checkbox("借券賣出增加幅度", key="filter_b4_pct_inc_short"), c2.checkbox("借券增加金額", key="filter_b4_amt_short_inc")
-        b4_price_chg = st.slider("設定漲跌幅區間：", -10.0, 10.0, (-10.0, 10.0), 0.5, key="filter_b4_price_chg")
-        c3, c4 = st.columns(2)
-        b4_acc_margin_dec, b4_acc_sbl_dec = c3.checkbox("⏩ 融資加速退場", key="filter_b4_acc_margin_dec"), c3.checkbox("⏩ 借券加速回補", key="filter_b4_acc_sbl_dec")
-        b4_acc_margin_inc, b4_acc_sbl_inc = c4.checkbox("⚠️ 融資加速套牢", key="filter_b4_acc_margin_inc"), c4.checkbox("⚠️ 借券加速放空", key="filter_b4_acc_sbl_inc")
-        b4_trend_logic = st.radio("B4 特徵篩選邏輯：", ["交集 (必須同時符合勾選特徵)", "聯集 (符合任一即可)"], horizontal=True, key="filter_b4_radio")
-        b4_trend_display_map = {"💥 終極": "💥 終極", "🚀 強軋": "🚀 強軋", "🔥 點火": "🔥 點火", "🔼 進駐": "🔼 進駐", "☠️ 極危": "☠️ 極危", "🚨 高危": "🚨 高危", "⚠️ 初危": "⚠️ 初危"}
-        b4_trends = [raw for d in st.multiselect("可複選雷達特徵：", list(b4_trend_display_map.values()), key="filter_b4_multi") for raw, desc in b4_trend_display_map.items() if d == desc]
-
-    # --- 模組 B5 ---
+    b3_latest_date_str = f"2026/{max(dates)[4:6]}/{max(dates)[6:]}" if dates else "2026/10/13"
+    
+    b4_latest_date_str = st.session_state.get('b4_squeeze_radar', {}).get('date', "2026/10/13")
+    
     df_1k = get_df('b5_1000')
-    b5_latest_date_str = f"2026/{col.replace('▼', '')[:2]}/{col.replace('▼', '')[2:]}" if (col := next((c for c in df_1k.columns if c.startswith('▼') and '6周' not in c), None)) else "未知日期"
-    with st.expander(f"🐳 B5 大腿動向過濾 (資料基準日: {b5_latest_date_str})", expanded=False):
-        c1, c2 = st.columns(2)
-        b5_long_short, b5_double = c1.checkbox("🎯 長短線共振", key="filter_b5_long_short"), c2.checkbox("🎯 雙引擎共振", key="filter_b5_double")
-        c3, c4, c5, c6 = st.columns(4)
-        b5_6w_1000, b5_6w_800, b5_6w_600, b5_6w_400 = c3.checkbox("👑 1000張", key="filter_b5_6w_1000"), c4.checkbox("🦅 800張", key="filter_b5_6w_800"), c5.checkbox("🦉 600張", key="filter_b5_6w_600"), c6.checkbox("🐺 400張", key="filter_b5_6w_400")
-        trend_opts = ["🚀 劇增", "🔥 大增", "📈 小增", "↗️ 微增", "🔄 持平", "↘️ 微減", "📉 小減", "⚠️ 大減", "🚨 劇減"]
-        c7, c8 = st.columns(2)
-        b5_trend_1000, b5_trend_800 = c7.multiselect("👑 1000張大戶週動態：", trend_opts, key="filter_b5_trend_1000"), c8.multiselect("🦅 800張大戶週動態：", trend_opts, key="filter_b5_trend_800")
-        c9, c10 = st.columns(2)
-        b5_trend_600, b5_trend_400 = c9.multiselect("🦉 600張大戶週動態：", trend_opts, key="filter_b5_trend_600"), c10.multiselect("🐺 400張大戶週動態：", trend_opts, key="filter_b5_trend_400")
+    b5_latest_date_str = f"2026/{col.replace('▼', '')[:2]}/{col.replace('▼', '')[2:]}" if (col := next((c for c in df_1k.columns if c.startswith('▼') and '6周' not in c), None)) else "2026/10/13"
 
-    # --- 模組 B6 ---
     dynamic_price_col_b6 = st.session_state.get('b6_dynamic_price_col')
-    b6_latest_date_str = f"2026/{date_part[:2]}/{date_part[2:]}" if dynamic_price_col_b6 and "▼" in dynamic_price_col_b6 and len(date_part := dynamic_price_col_b6.split(' ')[0].replace('▼', '')) == 4 else "未知日期"
-    with st.expander(f"💎 B6 鉅額交易過濾 (資料基準日: {b6_latest_date_str})", expanded=False):
-        b6_today_chk = st.checkbox("🎯 今日有發生鉅額交易", key="filter_b6_today")
-        b6_amt_min = st.slider("💰 鉅額總額大於 (億)：", 0.0, 50.0, 0.0, 0.5, key="filter_b6_amt_min")
-        b6_status_chk = st.multiselect("防線狀態：", ["🛡️ 防守成功 (收盤 >= 鉅額均價)", "🚨 跌破防線 (收盤 < 鉅額均價)"], key="filter_b6_status")
+    b6_latest_date_str = f"2026/{date_part[:2]}/{date_part[2:]}" if dynamic_price_col_b6 and "▼" in dynamic_price_col_b6 and len(date_part := dynamic_price_col_b6.split(' ')[0].replace('▼', '')) == 4 else "2026/10/13"
 
-    # --- 模組 B7 ---
     df_b7_tmp = get_df('b7_main')
     valid_m = [m for m in [c.replace('持股%', '') for c in df_b7_tmp.columns if '持股%' in c] if re.match(r'^\d{2}M\d{2}$|^\d{4,6}$', m)]
-    b7_latest_date_str = f"20{sorted(valid_m, reverse=True)[0].split('M')[0]}/{sorted(valid_m, reverse=True)[0].split('M')[1]}" if valid_m and 'M' in sorted(valid_m, reverse=True)[0] else (f"{sorted(valid_m, reverse=True)[0][:4]}/{sorted(valid_m, reverse=True)[0][4:]}" if valid_m else "未知月份")
-    with st.expander(f"👔 B7 董監動向過濾 (資料基準月: {b7_latest_date_str})", expanded=False):
-        c1, c2 = st.columns(2)
-        b7_hold_pct = c1.slider("🛡️ 董監持股比例區間：", 0.0, 100.0, (0.0, 100.0), 0.5, key="filter_b7_hold_pct")
-        b7_pledge_pct = c2.slider("⚠️ 董監質押比例區間：", 0.0, 100.0, (0.0, 100.0), 0.5, key="filter_b7_pledge_pct")
-        c3, c4 = st.columns(2)
-        b7_hold_trend = c3.multiselect("🛡️ 持股增減動態：", ["🔥 大增", "📈 增", "↗️ 微增", "🔄 持平", "↘️ 微減", "🚨 減/大減"], key="filter_b7_hold_trend")
-        b7_pledge_trend = c4.multiselect("⚠️ 質押增減動態：", ["🚨 暴增", "⚠️ 大增", "↗️ 微增", "➖ 持平", "↘️ 微減", "✅ 大減", "🌟 遽減"], key="filter_b7_pledge_trend")
-        b7_6m_inc = st.checkbox("🎯 近半年董監波段持股增加 (> 0)", key="filter_b7_6m_inc")
+    b7_latest_date_str = f"20{sorted(valid_m, reverse=True)[0].split('M')[0]}/{sorted(valid_m, reverse=True)[0].split('M')[1]}" if valid_m and 'M' in sorted(valid_m, reverse=True)[0] else (f"{sorted(valid_m, reverse=True)[0][:4]}/{sorted(valid_m, reverse=True)[0][4:]}" if valid_m else "2026/10")
 
-    # --- 模組 B8 ---
+    # ---------------------------
+    # B0 模組 (量價過濾)
+    # ---------------------------
+    b0_cols_explicit = [
+        '成交', '漲跌幅', 'PER', 'PBR', '成交張數_num', '今日成交額(萬)', '成交金額日變化率(%)',
+        'B0_量價狀態', 'B0_特殊型態', '資金延續趨勢', '5日均價', '5日均額(萬)', '5日均量(張)',
+        '較5日均額增加(萬)', '5日爆發倍數', '10日均價', '10日均額(萬)', '10日均量(張)', '較10日均額增加(萬)',
+        '10日爆發倍數', '20日均價', '20日均額(萬)', '20日均量(張)', '較20日均額增加(萬)', '20日爆發倍數',
+        '30日均價', '30日均額(萬)', '30日均量(張)', '較30日均額增加(萬)', '30日爆發倍數', '45日均價',
+        '45日均額(萬)', '45日均量(張)', '較45日均額增加(萬)', '45日爆發倍數', '60日均價', '60日均額(萬)',
+        '60日均量(張)', '較60日均額增加(萬)', '60日爆發倍數', '120日均價', '120日均額(萬)', '120日均量(張)',
+        '較120日均額增加(萬)', '120日爆發倍數', '180日均價', '180日均額(萬)', '180日均量(張)',
+        '較180日均額增加(萬)', '180日爆發倍數', '240日均價', '240日均額(萬)', '240日均量(張)',
+        '較240日均額增加(萬)', '240日爆發倍數'
+    ]
+    with st.expander(f"💰 B0 量價掃描過濾 (資料基準日: {b0_latest_date_str})", expanded=False):
+        if not master_df.empty:
+            sel_b0 = st.multiselect("📌 選擇要啟用的過濾欄位：", [c for c in b0_cols_explicit if c in master_df.columns], key="dyn_filter_sel_b0")
+            for col in sel_b0:
+                render_dynamic_column_filter(master_df, col, "B0", active_dynamic_filters)
+
+    # ---------------------------
+    # B1 模組 (法人動向過濾)
+    # ---------------------------
+    b1_cols_explicit = [
+        'B1_正向_法人持股(%)', 'B1_正向上榜區塊', 'B1_衰退_法人持股(%)', 'B1_負向上榜區塊', 'B1_累積衰退(%)',
+        'B1_外資買賣超張數', 'B1_投信買賣超張數', 'B1_自營買賣超張數', 'B1_合計買賣超張數', 'B1_外資持有(千張)',
+        'B1_外資持股(%)', 'B1_總法人持股(%)', 'B1_1日△Change', 'B1_估內資持股(%)', 'B1_外資1日△Change',
+        'B1_5日△Change', 'B1_5日排名', 'B1_20日△Change', 'B1_20日排名', 'B1_60日△Change', 'B1_60日排名',
+        'B1_120日△Change', 'B1_120日排名', 'B1_5日前一日排名', 'B1_20日前一日排名', 'B1_60日前一日排名',
+        'B1_120日前一日排名', 'B1_5日△排名', 'B1_20日△排名', 'B1_60日△排名', 'B1_120日△排名', 'B1_法人軌跡動態',
+        'B1_1日法人金額(萬)', 'B1_5日法人金額(萬)', 'B1_20日法人金額(萬)', 'B1_60日法人金額(萬)', 'B1_120日法人金額(萬)'
+    ]
+    with st.expander(f"📈 B1 法人動向過濾 (資料基準日: {b1_latest_date_str})", expanded=False):
+        if not master_df.empty:
+            sel_b1 = st.multiselect("📌 選擇要啟用的過濾欄位：", [c for c in b1_cols_explicit if c in master_df.columns], key="dyn_filter_sel_b1")
+            for col in sel_b1:
+                render_dynamic_column_filter(master_df, col, "B1", active_dynamic_filters)
+
+    # ---------------------------
+    # B2 模組 (法人掃貨過濾)
+    # ---------------------------
+    with st.expander(f"🚀 B2 法人掃貨過濾 (資料基準日: {b2_latest_date_str})", expanded=False):
+        if not master_df.empty:
+            b2_cols = [c for c in master_df.columns if str(c).startswith('B2_')]
+            sel_b2 = st.multiselect("📌 選擇要啟用的過濾欄位：", b2_cols, key="dyn_filter_sel_b2")
+            for col in sel_b2:
+                render_dynamic_column_filter(master_df, col, "B2", active_dynamic_filters)
+
+    # ---------------------------
+    # B3 模組 (法人連買過濾)
+    # ---------------------------
+    with st.expander(f"🔥 B3 法人連買過濾 (資料基準日: {b3_latest_date_str})", expanded=False):
+        if not master_df.empty:
+            b3_cols = [c for c in master_df.columns if str(c).startswith('B3_')]
+            sel_b3 = st.multiselect("📌 選擇要啟用的過濾欄位：", b3_cols, key="dyn_filter_sel_b3")
+            for col in sel_b3:
+                render_dynamic_column_filter(master_df, col, "B3", active_dynamic_filters)
+
+    # ---------------------------
+    # B4 模組 (資券動向過濾)
+    # ---------------------------
+    with st.expander(f"⚔️ B4 資券動向過濾 (資料基準日: {b4_latest_date_str})", expanded=False):
+        if not master_df.empty:
+            b4_cols = [c for c in master_df.columns if str(c).startswith('B4_')]
+            sel_b4 = st.multiselect("📌 選擇要啟用的過濾欄位：", b4_cols, key="dyn_filter_sel_b4")
+            for col in sel_b4:
+                render_dynamic_column_filter(master_df, col, "B4", active_dynamic_filters)
+
+    # ---------------------------
+    # B5 模組 (大腿動向過濾)
+    # ---------------------------
+    with st.expander(f"🐳 B5 大腿動向過濾 (資料基準日: {b5_latest_date_str})", expanded=False):
+        if not master_df.empty:
+            b5_cols = [c for c in master_df.columns if str(c).startswith('B5_')]
+            sel_b5 = st.multiselect("📌 選擇要啟用的過濾欄位：", b5_cols, key="dyn_filter_sel_b5")
+            for col in sel_b5:
+                render_dynamic_column_filter(master_df, col, "B5", active_dynamic_filters)
+
+    # ---------------------------
+    # B6 模組 (鉅額交易過濾)
+    # ---------------------------
+    with st.expander(f"💎 B6 鉅額交易過濾 (資料基準日: {b6_latest_date_str})", expanded=False):
+        if not master_df.empty:
+            b6_cols = [c for c in master_df.columns if str(c).startswith('B6_')]
+            sel_b6 = st.multiselect("📌 選擇要啟用的過濾欄位：", b6_cols, key="dyn_filter_sel_b6")
+            for col in sel_b6:
+                render_dynamic_column_filter(master_df, col, "B6", active_dynamic_filters)
+
+    # ---------------------------
+    # B7 模組 (董監動向過濾)
+    # ---------------------------
+    with st.expander(f"👔 B7 董監動向過濾 (資料基準月: {b7_latest_date_str})", expanded=False):
+        if not master_df.empty:
+            b7_cols = [c for c in master_df.columns if str(c).startswith('B7_')]
+            sel_b7 = st.multiselect("📌 選擇要啟用的過濾欄位：", b7_cols, key="dyn_filter_sel_b7")
+            for col in sel_b7:
+                render_dynamic_column_filter(master_df, col, "B7", active_dynamic_filters)
+
+    # ---------------------------
+    # 🏢 B8 模組 (券商主力與動能過濾) - 依照指示保留原樣
+    # ---------------------------
     b8_latest_date_str = st.session_state.get('b8_latest_date', '最新交易日').replace('-', '/') 
     with st.expander(f"🏢 B8 券商主力與動能過濾 (資料基準日: {b8_latest_date_str})", expanded=False):
         c1, c2 = st.columns(2)
@@ -486,154 +537,26 @@ def show_weight_backtest_page(STOCK_DICT, DATA_DIR="data"):
         b8_mom_trend = c6.multiselect("集中度最新動態：", ["↗️ 溫和吃貨", "➡️ 橫盤震盪", "⚠️ 大戶跳車 (警戒)", "🚀 籌碼急凍 (強勢吸籌)"], key="filter_b8_mom_trend")
         b8_mom_slope = st.checkbox("📈 單日 Δ > 5日 Δ > 10日 Δ (集中度動能斜率向上)", key="filter_b8_mom_slope")
 
+
     # ==========================================
-    # 執行過濾邏輯
+    # 🌟 執行過濾邏輯：套用全域 Master 檔案篩選
     # ==========================================
-    b0_p_min, b0_p_max = b0_price_range; b0_c_min, b0_c_max = b0_pct_range
-    if not df_b0.empty and any([b0_vol_min>0, b0_amt_min>0, b0_p_min>0, b0_p_max<25000, b0_c_min>-10, b0_c_max<10, b0_per_max>0, b0_exclude_loss]):
+    if active_dynamic_filters and not master_df.empty:
         any_filter_applied = True
-        mask = pd.Series(True, index=df_b0.index)
-        if '成交' in df_b0.columns: mask &= pd.to_numeric(df_b0['成交'].astype(str).str.replace(',', ''), errors='coerce').fillna(0).between(b0_p_min, b0_p_max)
-        if '漲跌幅' in df_b0.columns: mask &= pd.to_numeric(df_b0['漲跌幅'].astype(str).str.replace('%', ''), errors='coerce').fillna(0).between(b0_c_min, b0_c_max)
-        if '成交張數' in df_b0.columns and b0_vol_min>0: mask &= pd.to_numeric(df_b0['成交張數'].astype(str).str.replace(',', ''), errors='coerce').fillna(0) >= b0_vol_min
-        if '成交額(百萬)' in df_b0.columns and b0_amt_min>0: mask &= pd.to_numeric(df_b0['成交額(百萬)'].astype(str).str.replace(',', ''), errors='coerce').fillna(0) >= b0_amt_min
-        if 'PER' in df_b0.columns:
-            per_n = pd.to_numeric(df_b0['PER'], errors='coerce')
-            if b0_per_max > 0: mask &= ((per_n > 0) & (per_n <= b0_per_max)) | per_n.isna()
-            if b0_exclude_loss: mask &= (per_n > 0)
-        filtered_df = filtered_df[filtered_df['統一代號'].isin(df_b0[mask]['統一代號'].unique())]
+        mask = pd.Series(True, index=master_df.index)
         
-    if b0_vp_status and not df_b0.empty and 'B0_量價狀態' in df_b0.columns:
-        any_filter_applied = True
-        filtered_df = filtered_df[filtered_df['統一代號'].isin(df_b0[df_b0['B0_量價狀態'].isin(b0_vp_status)]['統一代號'].unique())]
-    if b0_explode_ratio > 0 and not df_b0.empty and '成交額(百萬)' in df_b0.columns and '5日均額' in df_b0.columns:
-        any_filter_applied = True
-        filtered_df = filtered_df[filtered_df['統一代號'].isin(df_b0[(pd.to_numeric(df_b0['成交額(百萬)'].astype(str).str.replace(',', ''), errors='coerce').fillna(0) / pd.to_numeric(df_b0['5日均額'].astype(str).str.replace(',', ''), errors='coerce').fillna(0).replace(0, 0.01)) >= b0_explode_ratio]['統一代號'].unique())]
-    if b0_fund_trend and '資金延續趨勢' in df_b0.columns:
-        any_filter_applied = True
-        filtered_df = filtered_df[filtered_df['統一代號'].isin(df_b0[df_b0['資金延續趨勢'].isin(b0_fund_trend)]['統一代號'].unique())]
+        for f_type, col, val in active_dynamic_filters:
+            if f_type == 'num_min':
+                mask &= (pd.to_numeric(master_df[col], errors='coerce') >= val)
+            elif f_type == 'num_max':
+                mask &= (pd.to_numeric(master_df[col], errors='coerce') <= val)
+            elif f_type == 'cat_in':
+                mask &= master_df[col].astype(str).isin(val)
 
-    if not df_b1_raw.empty:
-        mask = pd.Series(True, index=df_b1_raw.index)
-        b1_checked = False
-        if b1_delta: b1_checked = True; mask &= (pd.to_numeric(df_b1_raw['△'].astype(str).str.replace('%|\\+', '', regex=True), errors='coerce').fillna(0) > 0)
-        for chk, tag in zip([b1_5d, b1_20d, b1_60d, b1_120d], ['🔴5日', '🟡20日', '🟢60日', '🔵120日']):
-            if chk: b1_checked = True; mask &= df_b1_raw['今日上榜'].astype(str).str.contains(tag)
-        if b1_ratio_min > 0 or b1_ratio_max < 100:
-            b1_checked = True; mask &= pd.to_numeric(df_b1_raw['法人持股'].astype(str).str.replace('%', '', regex=False).replace('未進榜', '0'), errors='coerce').fillna(0).between(b1_ratio_min, b1_ratio_max)
-        for col, (vmin, vmax) in zip(['5日ΔChange', '20日ΔChange', '60日ΔChange', '120日ΔChange'], [b1_5d_chg, b1_20d_chg, b1_60d_chg, b1_120d_chg]):
-            if vmin > -100 or vmax < 100: b1_checked = True; mask &= pd.to_numeric(df_b1_raw[col].astype(str).str.replace('%|\\+', '', regex=True), errors='coerce').between(vmin, vmax)
-        if b1_trends:
-            b1_checked = True
-            is_and = "交集" in b1_trend_logic
-            t_mask = pd.Series(True, index=df_b1_raw.index) if is_and else pd.Series(False, index=df_b1_raw.index)
-            for t in b1_trends:
-                cond = (df_b1_raw['最新動態'].astype(str).str.contains("衝進") & df_b1_raw['最新動態'].astype(str).str.contains(t.replace("🚀 衝進", "").replace("榜單", ""))) if "衝進" in t else df_b1_raw['最新動態'].astype(str).str.contains(t)
-                t_mask = (t_mask & cond) if is_and else (t_mask | cond)
-            mask &= t_mask
-        if b1_checked:
-            any_filter_applied = True
-            filtered_df = filtered_df[filtered_df['統一代號'].isin(df_b1_raw[mask]['統一代號'].unique())]
+        valid_stock_ids = master_df[mask]['統一代號'].astype(str).unique()
+        filtered_df = filtered_df[filtered_df['統一代號'].isin(valid_stock_ids)]
 
-    for is_chk, k in zip([b2_1_chk, b2_2_chk, b2_3_chk, b2_4_chk], ['b2_1', 'b2_2', 'b2_3', 'b2_4']):
-        if is_chk and not (df := get_df(k)).empty and (l_col := next((c for c in df.columns if '%' in c), None)):
-            any_filter_applied = True
-            filtered_df = filtered_df[filtered_df['統一代號'].isin(df[pd.to_numeric(df[l_col].astype(str).replace("未進榜", 0), errors='coerce').fillna(0) > 0].head(b2_top_n)['統一代號'])]
-    if b2_trends:
-        any_filter_applied = True
-        df_b2_all = pd.concat([df[['統一代號', '今日短動態']] for k in ['b2_1', 'b2_2', 'b2_3', 'b2_4'] if not (df := get_df(k)).empty and '今日短動態' in df.columns])
-        if not df_b2_all.empty:
-            dyn = df_b2_all.groupby('統一代號')['今日短動態'].apply(lambda x: " | ".join(x.dropna().astype(str))).reset_index()
-            is_and = "交集" in b2_trend_logic
-            t_mask = pd.Series(True, index=dyn.index) if is_and else pd.Series(False, index=dyn.index)
-            for t in b2_trends: t_mask = (t_mask & dyn['今日短動態'].str.contains(t)) if is_and else (t_mask | dyn['今日短動態'].str.contains(t))
-            filtered_df = filtered_df[filtered_df['統一代號'].isin(dyn[t_mask]['統一代號'].unique())]
-
-    df_b3_main = get_df('b3_main')
-    if not df_b3_main.empty:
-        for is_chk, min_n, t_name in zip([b3_fo_day_chk, b3_it_day_chk, b3_fo_wk_chk, b3_it_wk_chk], [b3_fo_day_n, b3_it_day_n, b3_fo_wk_n, b3_it_wk_n], ['🌐 外資日連買', '🏦 投信日連買', '🌐 外資週連買', '🏦 投信週連買']):
-            if is_chk:
-                any_filter_applied = True
-                filtered_df = filtered_df[filtered_df['統一代號'].isin(df_b3_main[(df_b3_main['連買類型'] == t_name) & (df_b3_main['連買週期數'] >= min_n)]['統一代號'])]
-        if b3_trends:
-            any_filter_applied = True
-            dyn = df_b3_main.groupby('股票代號')['狀態動態'].apply(lambda x: " | ".join(x.dropna().astype(str))).reset_index()
-            is_and = "交集" in b3_trend_logic
-            t_mask = pd.Series(True, index=dyn.index) if is_and else pd.Series(False, index=dyn.index)
-            for t in b3_trends: t_mask = (t_mask & dyn['狀態動態'].str.contains(t)) if is_and else (t_mask | dyn['狀態動態'].str.contains(t))
-            filtered_df = filtered_df[filtered_df['統一代號'].isin(dyn[t_mask]['股票代號'].unique())]
-
-    for is_chk, k in zip([b4_41_pct, b4_41_vol, b4_42_pct, b4_42_vol, b4_43_pct, b4_43_vol, b4_inc_margin_pct, b4_inc_short_pct, b4_short_dec_amt, b4_short_inc_amt], ['b4_margin_pct', 'b4_margin_vol', 'b4_short_pct', 'b4_short_vol', 'b4_margin_plus_pct', 'b4_margin_plus_vol', 'b4_margin_inc_pct', 'b4_short_inc_pct', 'b4_short_dec_amt', 'b4_short_inc_amt']):
-        if is_chk and not (df := get_df(k)).empty:
-            any_filter_applied = True; filtered_df = filtered_df[filtered_df['統一代號'].isin(df.head(b4_top_n)['統一代號'])]
-    if b4_trends:
-        any_filter_applied = True
-        df_radar = pd.concat([clean_stock_id(st.session_state.get('b4_squeeze_radar', {}).get('df', pd.DataFrame()))[['統一代號', '軋空評估']].rename(columns={'軋空評估': '動態'}), clean_stock_id(st.session_state.get('b4_risk_radar', {}).get('df', pd.DataFrame()))[['統一代號', '套牢評估']].rename(columns={'套牢評估': '動態'})]).dropna()
-        if not df_radar.empty:
-            dyn = df_radar.groupby('統一代號')['動態'].apply(lambda x: " | ".join(x.astype(str))).reset_index()
-            is_and = "交集" in b4_trend_logic
-            t_mask = pd.Series(True, index=dyn.index) if is_and else pd.Series(False, index=dyn.index)
-            for t in b4_trends: t_mask = (t_mask & dyn['動態'].str.contains(t)) if is_and else (t_mask | dyn['動態'].str.contains(t))
-            filtered_df = filtered_df[filtered_df['統一代號'].isin(dyn[t_mask]['統一代號'].unique())]
-    if b4_price_chg[0] > -10 or b4_price_chg[1] < 10:
-        any_filter_applied = True
-        df_p = pd.concat([get_df('b4_margin_pct')[['統一代號', '漲跌幅%']], get_df('b4_margin_inc_pct')[['統一代號', '漲跌幅%']]]).drop_duplicates(subset=['統一代號']).dropna()
-        if not df_p.empty: filtered_df = filtered_df[filtered_df['統一代號'].isin(df_p[df_p['漲跌幅%'].between(*b4_price_chg)]['統一代號'].unique())]
-    for is_chk, key, d in zip([b4_acc_margin_dec, b4_acc_sbl_dec, b4_acc_margin_inc, b4_acc_sbl_inc], ['b4_margin_vol', 'b4_short_vol', 'b4_margin_inc_vol', 'b4_short_inc_vol'], ['dec', 'dec', 'inc', 'inc']):
-        if is_chk and not (df := get_df(key)).empty:
-            any_filter_applied = True
-            c_today, c_5d, c_price = next((c for c in df.columns if '當日' in c and '張' in c), None), next((c for c in df.columns if '5日' in c and '張' in c), None), '成交' if '成交' in df.columns else None
-            if c_today and c_5d and c_price:
-                n_tdy, n_5d, p = pd.to_numeric(df[c_today].astype(str).str.replace(',', ''), errors='coerce').fillna(0), pd.to_numeric(df[c_5d].astype(str).str.replace(',', ''), errors='coerce').fillna(0), pd.to_numeric(df[c_price].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-                amt_tdy, amt_5d = n_tdy * p * 1000, (n_5d / 5.0) * p * 1000
-                if d == 'inc':
-                    valid = df[(amt_tdy >= 10000000) & (amt_tdy > amt_5d) & (pd.to_numeric(df[next((c for c in df.columns if '漲跌幅' in c.replace(' ', '')), None)].astype(str).str.replace('%', ''), errors='coerce').fillna(0) < 0)]['統一代號'] if 'margin' in key else df[(amt_tdy >= 10000000) & (amt_tdy > amt_5d)]['統一代號']
-                else: valid = df[(amt_tdy <= -10000000) & (amt_tdy < amt_5d)]['統一代號']
-                filtered_df = filtered_df[filtered_df['統一代號'].isin(valid.unique())]
-
-    df_1k, df_800, df_600, df_400 = get_df('b5_1000'), get_df('b5_800'), get_df('b5_600'), get_df('b5_400')
-    if (b5_long_short or b5_double) and not df_1k.empty and not df_400.empty:
-        any_filter_applied = True
-        c1k, c400 = next((c for c in df_1k.columns if c.startswith('▼') and '6周' not in c), None), next((c for c in df_400.columns if c.startswith('▼') and '6周' not in c), None)
-        valid_res = set()
-        if b5_long_short and c1k and c400:
-            valid_res.update(set(df_1k[(pd.to_numeric(df_1k['▼6周增減'], errors='coerce')>0) & (pd.to_numeric(df_1k[c1k], errors='coerce')>0)]['統一代號']).intersection(set(df_400[(pd.to_numeric(df_400['▼6周增減'], errors='coerce')>0) & (pd.to_numeric(df_400[c400], errors='coerce')>0)]['統一代號'])))
-        if b5_double:
-            s_inc = set(df_1k[df_1k['週動態'].astype(str).str.contains('增', na=False)]['統一代號']).intersection(set(df_400[df_400['週動態'].astype(str).str.contains('增', na=False)]['統一代號']))
-            valid_res = valid_res.intersection(s_inc) if b5_long_short else valid_res.union(s_inc)
-        filtered_df = filtered_df[filtered_df['統一代號'].isin(list(valid_res))]
-    for chk, df_lvl in zip([b5_6w_1000, b5_6w_800, b5_6w_600, b5_6w_400], [df_1k, df_800, df_600, df_400]):
-        if chk and not df_lvl.empty and '▼6周增減' in df_lvl.columns:
-            any_filter_applied = True; filtered_df = filtered_df[filtered_df['統一代號'].isin(df_lvl[pd.to_numeric(df_lvl['▼6周增減'], errors='coerce').fillna(0) > 0]['統一代號'].unique())]
-    for tr, df_lvl in zip([b5_trend_1000, b5_trend_800, b5_trend_600, b5_trend_400], [df_1k, df_800, df_600, df_400]):
-        if tr and not df_lvl.empty and '週動態' in df_lvl.columns:
-            any_filter_applied = True; filtered_df = filtered_df[filtered_df['統一代號'].isin(df_lvl[df_lvl['週動態'].isin(tr)]['統一代號'].unique())]
-
-    if (b6_today_chk or b6_amt_min > 0 or b6_status_chk) and not (df_b6 := get_df('b6_today')).empty:
-        any_filter_applied = True
-        mask = pd.Series(True, index=df_b6.index)
-        if b6_amt_min > 0: mask &= pd.to_numeric(df_b6['總額(億)'], errors='coerce').fillna(0) >= b6_amt_min
-        if b6_status_chk and dynamic_price_col_b6 in df_b6.columns:
-            def check_s(r):
-                try: return "🛡️ 防守成功 (收盤 >= 鉅額均價)" if float(str(r['▼收盤價']).replace(',', '')) >= (sum([float(p) for p in str(r[dynamic_price_col_b6]).split(' / ')]) / len(str(r[dynamic_price_col_b6]).split(' / '))) else "🚨 跌破防線 (收盤 < 鉅額均價)"
-                except: return "未知"
-            mask &= df_b6.apply(check_s, axis=1).isin(b6_status_chk)
-        filtered_df = filtered_df[filtered_df['統一代號'].isin(df_b6[mask]['統一代號'].unique())]
-
-    if b7_hold_pct[0] > 0 or b7_hold_pct[1] < 100 or b7_pledge_pct[0] > 0 or b7_pledge_pct[1] < 100:
-        if not (df_pld := get_df('b7_pledge')).empty:
-            any_filter_applied = True; mask = pd.Series(True, index=df_pld.index)
-            if b7_hold_pct[0] > 0 or b7_hold_pct[1] < 100: mask &= pd.to_numeric(df_pld['全體 董監 持股 (%)'].astype(str).str.replace('%', ''), errors='coerce').fillna(0).between(*b7_hold_pct)
-            if b7_pledge_pct[0] > 0 or b7_pledge_pct[1] < 100: mask &= pd.to_numeric(df_pld['全體 董監 質押 (%)'].astype(str).str.replace('%', ''), errors='coerce').fillna(0).between(*b7_pledge_pct)
-            filtered_df = filtered_df[filtered_df['統一代號'].isin(df_pld[mask]['統一代號'].unique())]
-    if b7_hold_trend and not (df_b7 := get_df('b7_main')).empty and '動態' in df_b7.columns:
-        any_filter_applied = True; filtered_df = filtered_df[filtered_df['統一代號'].isin(df_b7[df_b7['動態'].isin(b7_hold_trend)]['統一代號'].unique())]
-    if b7_pledge_trend and not (df_h := get_df('b7_pledge_history')).empty and '動態' in df_h.columns:
-        any_filter_applied = True; filtered_df = filtered_df[filtered_df['統一代號'].isin(df_h[df_h['動態'].isin(b7_pledge_trend)]['統一代號'].unique())]
-    if b7_6m_inc and not (df_b7 := get_df('b7_main')).empty and '▼近半年增減%' in df_b7.columns:
-        any_filter_applied = True; filtered_df = filtered_df[filtered_df['統一代號'].isin(df_b7[pd.to_numeric(df_b7['▼近半年增減%'], errors='coerce').fillna(0) > 0]['統一代號'].unique())]
-
-    # B8 執行過濾邏輯 (對接 HF Parquet)
+    # 執行 B8 (既有的 HF Parquet) 過濾
     if b8_day_streak > 0 or b8_top15_money > 0:
         if not (df_t15 := clean_stock_id(fetch_parquet_from_hf("scan__依主力Top15買超張數排行_復刻三竹.parquet"))).empty:
             any_filter_applied = True; mask = pd.Series(True, index=df_t15.index)
@@ -669,7 +592,7 @@ def show_weight_backtest_page(STOCK_DICT, DATA_DIR="data"):
     st.write("---")
 
     # ==========================================
-    # 2. 第二關：自訂權重計分面板
+    # 2. 第二關：自訂權重計分面板 (保留原始計分邏輯與變數對接)
     # ==========================================
     st.markdown("#### 2️⃣ 設定計分權重 (Weights)")
     st.caption("為各項籌碼動向設定加權分數 (設定為 0 代表不計分，負數代表扣分)")
@@ -683,6 +606,8 @@ def show_weight_backtest_page(STOCK_DICT, DATA_DIR="data"):
     # ==========================================
     # 3. 執行計分運算 (Scoring Engine) - 🚀 向量化加速版
     # ==========================================
+    df_b1_raw = get_df('b1_final_df')
+
     if st.button("開始計算權重分數", icon=":material/vital_signs:", use_container_width=True):
         with st.spinner("🧠 籌碼大數據融合計算中..."):
             score_df = filtered_df.copy()
