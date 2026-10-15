@@ -124,6 +124,14 @@ def process_b0_features(DATA_DIR, OUTPUT_DIR):
     v = (m5 > 0) & (m10 > 0) & (m20 > 0)
     df_today['資金延續趨勢'] = np.select([v & (m5 > m10) & (m10 > m20), v & (t_amt > m5) & (m5 <= m10), v & (m5 < m10) & (m10 < m20), v], ["🔥 資金湧入", "⚡ 單日點火", "💧 資金退潮", "⚖️ 震盪換手"], default="⚪ 資料不足")
 
+    # 👇👇👇 請在這裡加入以下這段，補回前端需要的檔案 👇👇👇
+    lite_history = combined_df[['stock_code', 'trade_date', '漲跌幅']].copy()
+    lite_history = lite_history.rename(columns={'stock_code': '統一代號', 'trade_date': '標準日期'})
+    lite_history.to_parquet(os.path.join(OUTPUT_DIR, "B0_lite_history.parquet"), index=False)
+    lite_history.to_csv(os.path.join(OUTPUT_DIR, "B0_lite_history.csv"), index=False, encoding='utf-8-sig')
+    print(" └─ 🏆 已同步產出前端專用的 B0_lite_history 檔案")
+    # 👆👆👆 加入到這裡為止 👆👆👆
+    
     base_cols = ['stock_code', 'stock_name', 'trade_date', '成交', '漲跌幅', 'PER', 'PBR', '成交張數_num', '今日成交額(萬)', '成交金額日變化率(%)', 'B0_量價狀態', 'B0_特殊型態', '資金延續趨勢']
     dynamic_cols = []
     for p in periods: dynamic_cols.extend([f'{p}日均價', f'{p}日均額(萬)', f'{p}日均量(張)', f'較{p}日均額增加(萬)', f'{p}日爆發倍數'])
