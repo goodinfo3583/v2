@@ -1044,9 +1044,13 @@ def run_master_pipeline():
     missing_cols = [c for c in df_master.columns if c not in ordered_cols]
     df_master = df_master[ordered_cols + missing_cols]
     
-    out_parquet, out_csv = f"{OUTPUT_DIR}/{target_date}_master_features.parquet", f"{OUTPUT_DIR}/{target_date}_master_features.csv"
+    out_parquet = f"{OUTPUT_DIR}/{target_date}_master_features.parquet"
+    out_csv = f"{OUTPUT_DIR}/{target_date}_master_features.csv"
+    out_txt = f"{OUTPUT_DIR}/{target_date}_master_features.txt" # 🌟 新增 TXT 路徑
+    
     df_master.to_parquet(out_parquet, index=False)
     df_master.to_csv(out_csv, index=False, encoding='utf-8-sig')
+    df_master.to_csv(out_txt, index=False, encoding='utf-8-sig', sep='\t') # 🌟 輸出 TXT (用 Tab 分隔)
     
     print(f"\n🎉 完美大一統 B0~B7 ETL 執行完畢！")
     print(f"📁 檔案已直接存至前台會讀取的：\n  - {out_parquet}\n  - {out_csv}")
