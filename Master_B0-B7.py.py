@@ -1041,19 +1041,31 @@ def run_master_pipeline():
     
     ordered_cols = base_and_b0 + b1_cols + b2_cols + b3_cols + b4_cols + b5_cols + b6_cols + b7_cols
     
+    # === 前方維持原本的欄位重排與合併 ===
     missing_cols = [c for c in df_master.columns if c not in ordered_cols]
     df_master = df_master[ordered_cols + missing_cols]
     
     out_parquet = f"{OUTPUT_DIR}/{target_date}_master_features.parquet"
     out_csv = f"{OUTPUT_DIR}/{target_date}_master_features.csv"
-    out_txt = f"{OUTPUT_DIR}/{target_date}_master_features.txt" # 🌟 新增 TXT 路徑
     
+    # 1. 輸出給 Streamlit / Excel 看的標準版 (帶 BOM)
     df_master.to_parquet(out_parquet, index=False)
     df_master.to_csv(out_csv, index=False, encoding='utf-8-sig')
-    df_master.to_csv(out_txt, index=False, encoding='utf-8-sig', sep='\t') # 🌟 輸出 TXT (用 Tab 分隔)
     
-    print(f"\n🎉 完美大一統 B0~B7 ETL 執行完畢！")
-    print(f"📁 檔案已直接存至前台會讀取的：\n  - {out_parquet}\n  - {out_csv}")
+    # 👇👇👇 AI (NotebookLM) 專用大表 (替換原本的降維版) 👇👇👇
+    out_ai_txt = f"{OUTPUT_DIR}/{target_date}_master_features_AI_Analysis.txt"
+    # 關鍵修改：
+    # 1. 直接餵入 df_master (完整 337 欄，保留所有均線、爆發倍數與法人張數)
+    # 2. 嚴格使用 encoding='utf-8' (去除 BOM)
+    # 3. 檔名改為 .txt 格式
+    df_master.to_csv(out_ai_txt, index=False, encoding='utf-8')
+    # 👆👆👆 ========================================================================= 👆👆👆
 
+    print(f"\n🎉 完美大一統 B0~B7 ETL 執行完畢！")
+    print(f"📁 檔案已直接存至前台會讀取的：\n  - {out_parquet}\n  - {out_csv}\n  - {out_ai_txt} (🤖 AI NBLM 專用檔)")
+
+# ==========================================
+# 程式執行入口 (最底下保持這樣乾乾淨淨即可)
+# ==========================================
 if __name__ == "__main__":
     run_master_pipeline()
