@@ -99,7 +99,7 @@ def load_stock_trends():
         return pd.DataFrame()
 
 # 🌟 3. 標籤與共用格式函數
-BROKER_TAGS = {"凱基台北": "⚠️隔日沖", "統一城中": "⚠️隔日沖", "元大土城永寧": "⚠️隔日沖", "美林": "🌐外資", "台灣摩根士丹利": "🌐外資", "美商高盛":"🌐外資","瑞銀":"🌐外資"}
+BROKER_TAGS = {"凱基台北": "⚠️隔日沖", "統一城中": "⚠️隔日沖", "元大土城永寧": "⚠️隔日沖", "美林": "🌐外資", "摩根大通":"🌐外資", "台灣摩根士丹利": "🌐外資", "美商高盛":"🌐外資", "瑞銀":"🌐外資", "港麥格理":"🌐外資"}
 def apply_broker_tags(broker_name):
     name_str = str(broker_name)
     tag = BROKER_TAGS.get(name_str, "")
@@ -119,7 +119,7 @@ def fmt_int(val):
 def render_broker_dashboard(target_stock, display_name, stock_raw, df_trend):
     # stock_raw 已經是乾淨的單股資料，直接使用
     latest_data = df_trend.iloc[-1]
-    st.metric(label=f"{latest_data['trade_date']} 最新券商分點集中度", value=f"{latest_data['concentration_%']}%", delta=f"主力淨買超 {latest_data['net_buy']:,} 張")   
+    st.metric(label=f"{latest_data['trade_date']} 最新券商分點集中度", value=f"{latest_data['concentration_%']}%", delta=f"主力淨買超 {latest_data['net_buy']:,} 張")
 
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
