@@ -99,7 +99,7 @@ def load_stock_trends():
         return pd.DataFrame()
 
 # 🌟 3. 標籤與共用格式函數
-BROKER_TAGS = {"凱基台北": "⚠️隔日沖", "統一城中": "⚠️隔日沖", "元大土城永寧": "⚠️隔日沖", "美林": "🌐外資", "台灣摩根士丹利": "🌐外資"}
+BROKER_TAGS = {"凱基台北": "⚠️隔日沖", "統一城中": "⚠️隔日沖", "元大土城永寧": "⚠️隔日沖", "美林": "🌐外資", "台灣摩根士丹利": "🌐外資", "美商高盛":"🌐外資","瑞銀":"🌐外資"}
 def apply_broker_tags(broker_name):
     name_str = str(broker_name)
     tag = BROKER_TAGS.get(name_str, "")
