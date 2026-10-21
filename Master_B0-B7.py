@@ -156,22 +156,39 @@ def process_b1_features(DATA_DIR, target_date):
     
     df_up, df_down, df_fi, d_cols = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
     
-    for i, file in enumerate(f_up_history[:4]):
+    def agg_sections_func(x):
+        valid_x = set()
+        for val in x:
+            if pd.notna(val) and str(val).strip() != "":
+                for p in str(val).split(','): valid_x.add(p.strip())
+        return ",".join([s for s in ['5日', '20日', '60日', '120日'] if s in valid_x])
+
+    for i, file in enumerate(f_up_history[:30]):
         try:
             df = pd.read_csv(file, encoding='utf-8-sig')
             df.columns = [str(c).replace(" ", "").strip() for c in df.columns]
+            if '股票代號' not in df.columns: continue
             df['stock_code'] = df['股票代號'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.zfill(4)
+            df['法人持股'] = pd.to_numeric(df['法人持股'], errors='coerce')
+            if '上榜區塊' not in df.columns: df['上榜區塊'] = ""
+            
+            # 對齊 b1_page.py：防止單日重複代號並固定區塊排序
+            df = df.groupby('stock_code', as_index=False).agg({'法人持股': 'max', '上榜區塊': agg_sections_func})
+            
             if i == 0:
                 df.rename(columns={'法人持股': 'B1_正向_法人持股(%)', '上榜區塊': 'B1_正向上榜區塊'}, inplace=True)
                 df_up, d_cols = df, ['B1_正向_法人持股(%)']
             else:
                 col_name, sec_name = f'持股%_{i}', f'區塊_{i}'
-                df = df[['stock_code', '法人持股', '上榜區塊']].rename(columns={'法人持股': col_name, '上榜區塊': sec_name}) if '上榜區塊' in df.columns else df[['stock_code', '法人持股']].assign(上榜區塊="").rename(columns={'法人持股': col_name, '上榜區塊': sec_name})
-                df_up = pd.merge(df_up, df, on='stock_code', how='left')
+                df = df[['stock_code', '法人持股', '上榜區塊']].rename(columns={'法人持股': col_name, '上榜區塊': sec_name})
+                if df_up.empty:
+                    df_up = df
+                else:
+                    df_up = pd.merge(df_up, df, on='stock_code', how='outer')
                 d_cols.append(col_name)
         except Exception: pass
-    for c in d_cols: df_up[c] = pd.to_numeric(df_up[c], errors='coerce')
-
+    for c in d_cols: 
+        if c in df_up.columns: df_up[c] = pd.to_numeric(df_up[c], errors='coerce')
     for i, file in enumerate(f_down_history[:2]):
         try:
             df = pd.read_csv(file, encoding='utf-8-sig')
@@ -287,9 +304,78 @@ def process_b1_features(DATA_DIR, target_date):
     if 'B1_外資持有(千張)' in master_b1.columns and 'B1_外資持股(%)' in master_b1.columns:
         master_b1['估算總發行張數'] = np.where(master_b1['B1_外資持股(%)'] > 0, (master_b1['B1_外資持有(千張)'] * 1000) / (master_b1['B1_外資持股(%)'] / 100), np.nan)
 
-    master_b1['B1_法人軌跡動態'] = master_b1.apply(lambda r: "⚠️ 多空交戰 (籌碼分歧)" if str(r.get('B1_正向上榜區塊', '')) and str(r.get('B1_負向上榜區塊', '')) else ("👑 長線吸籌" if '120日' in str(r.get('B1_正向上榜區塊', '')) or '60日' in str(r.get('B1_正向上榜區塊', '')) else ("🔥 波段佈局" if '20日' in str(r.get('B1_正向上榜區塊', '')) else "🚀 短線點火")) if str(r.get('B1_正向上榜區塊', '')) else ("☠️ 長線提款" if '30日' in str(r.get('B1_負向上榜區塊', '')) or '20日' in str(r.get('B1_負向上榜區塊', '')) else "🩸 短線棄守") if str(r.get('B1_負向上榜區塊', '')) else "⚪ 無明顯軌跡", axis=1)
+    # 🌟 完整移植 b1_page.py 的「最新動態」邏輯 + 原有多空定調
+    def evaluate_b1_full_dynamics(r):
+        pos_sec = str(r.get('B1_正向上榜區塊', '')) if pd.notna(r.get('B1_正向上榜區塊')) else ''
+        neg_sec = str(r.get('B1_負向上榜區塊', '')) if pd.notna(r.get('B1_負向上榜區塊')) else ''
+        
+        # 1. 原有的多空宏觀定調
+        if pos_sec and neg_sec:
+            base_tag = "⚠️ 多空交戰 (籌碼分歧)"
+        elif pos_sec:
+            if '120日' in pos_sec or '60日' in pos_sec: base_tag = "👑 長線吸籌"
+            elif '20日' in pos_sec: base_tag = "🔥 波段佈局"
+            else: base_tag = "🚀 短線點火"
+        elif neg_sec:
+            if '30日' in neg_sec or '20日' in neg_sec: base_tag = "☠️ 長線提款"
+            else: base_tag = "🩸 短線棄守"
+        else:
+            base_tag = "⚪ 無明顯軌跡"
 
-    cols_drop = [c for c in d_cols if c != 'B1_正向_法人持股(%)'] + ['區塊_1', '區塊_2', '區塊_3', 'B1_衰退_法人持股(%)_T1', 'B1_總法人持股(%)_T1', 'B1_外資持股(%)_T1']
+        # 2. b1_page.py 的「最新動態」運算 (將未上榜的 NaN 視為 0.0)
+        vals = [float(r[c]) if (c in r and pd.notna(r[c])) else 0.0 for c in d_cols]
+        
+        # 若過去 30 天從未出現在正向榜單，直接回傳原有定調
+        if not any(v > 0 for v in vals):
+            return base_tag
+            
+        if len(vals) < 2:
+            b1_trend = "⚪ 資料不足"
+        else:
+            dynamics = []
+            v0, v1 = vals[0], vals[1]
+            diff1 = v0 - v1
+            if diff1 > 0:
+                is_slowing = False
+                if len(vals) >= 3:
+                    v2 = vals[2]
+                    if v0 > v1 > v2 > 0:
+                        dynamics.append("🪜 階梯吸籌")
+                    elif len(vals) >= 4 and v0 >= v1 >= v2 >= vals[3] > 0 and v0 > vals[3]:
+                        dynamics.append("🛡️ 穩健吸籌")
+                    if v1 != 0 and v2 != 0 and diff1 < (v1 - v2):
+                        dynamics.append("⚠️ 趨緩")
+                        is_slowing = True
+                if not is_slowing:
+                    dynamics.append("📈 上升")
+            elif diff1 < 0:
+                dynamics.append("📉 下降")
+            else:
+                dynamics.append("🔄 持平")
+
+            today_list = [s for s in pos_sec.split(',') if s]
+            yest_sec = str(r.get('區塊_1', '')) if pd.notna(r.get('區塊_1')) else ''
+            yest_list = [s for s in yest_sec.split(',') if s]
+
+            if v0 > 0 and v1 == 0 and any(v > 0 for v in vals[2:]):
+                dynamics.append("🔄 洗盤回歸")
+            if 1 <= len(yest_list) <= 3 and len(today_list) > len(yest_list):
+                new_entries = [i for i in today_list if i not in yest_list]
+                tags = [tag for tag, key in [('🔴5日', '5日'), ('🟡20日', '20日'), ('🟢60日', '60日'), ('🔵120日', '120日')] if any(key in item for item in new_entries)]
+                if tags:
+                    dynamics.append(f"🚀 衝進{'、'.join(tags)}榜單")
+            b1_trend = " | ".join(dynamics)
+
+        # 💡 組合輸出：若原本是「⚪ 無明顯軌跡」(例如昨在榜、今掉出榜)，直接顯示 b1_trend (如：📉 下降)
+        if base_tag == "⚪ 無明顯軌跡":
+            return b1_trend
+        return f"{base_tag} | {b1_trend}"
+
+    master_b1['B1_法人軌跡動態'] = master_b1.apply(evaluate_b1_full_dynamics, axis=1)
+
+    # 清除 30 天的過程欄位，保持 master_features 乾淨
+    sec_drop = [f'區塊_{i}' for i in range(1, 30)]
+    cols_drop = [c for c in d_cols if c != 'B1_正向_法人持股(%)'] + sec_drop + ['B1_衰退_法人持股(%)_T1', 'B1_總法人持股(%)_T1', 'B1_外資持股(%)_T1']
     master_b1.drop(columns=[c for c in cols_drop if c in master_b1.columns], inplace=True)
     return master_b1
 # ==========================================
