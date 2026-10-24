@@ -785,29 +785,64 @@ def process_b7_features(DATA_DIR):
 
     df_b7_features = pd.DataFrame({'stock_code': master_df['stock_code'].unique()})
 
-    # --- 1. 計算董監持股趨勢 ---
+    # --- 1. 計算董監持股趨勢 (擴充為近月 + 前1~前5月增減) ---
     if c_hold:
         hold_df = master_df[['stock_code', c_month, c_hold]].copy()
         hold_df[c_hold] = pd.to_numeric(hold_df[c_hold].astype(str).str.replace('%', '', regex=False).str.replace(',', '', regex=False), errors='coerce')
         hold_df = hold_df.drop_duplicates(subset=['stock_code', c_month], keep='first')
         pivot_h = hold_df.pivot(index='stock_code', columns=c_month, values=c_hold).reset_index()
-        m_cols_h = sorted([c for c in pivot_h.columns if c != 'stock_code'], reverse=True)[:2]
         
-        if len(m_cols_h) >= 2:
-            pivot_h['B7_董監近月增減(%)'] = (pivot_h[m_cols_h[0]] - pivot_h[m_cols_h[1]]).round(2)
-            pivot_h['B7_董監最新持股(%)'] = pivot_h[m_cols_h[0]]
-            
-            def get_hold_trend(val):
-                if pd.isna(val): return "⚪ 無資料"
-                if val >= 1.0: return "🔥 大增"
-                if val >= 0.1: return "📈 增"
-                if val > 0: return "↗️ 微增"
-                if val == 0: return "🔄 持平"
-                if val > -0.1: return "↘️ 微減"
-                return "🚨 大減"
-            pivot_h['B7_董監持股動態'] = pivot_h['B7_董監近月增減(%)'].apply(get_hold_trend)
-            df_b7_features = pd.merge(df_b7_features, pivot_h[['stock_code', 'B7_董監最新持股(%)', 'B7_董監近月增減(%)', 'B7_董監持股動態']], on='stock_code', how='left')
+        # 💡 取最近 7 個月份 (例如 26M09 ~ 26M03)，才能兩兩相減算出 6 個月份的增減
+        m_cols_h = sorted([c for c in pivot_h.columns if c != 'stock_code'], reverse=True)[:7]
+        
+        if len(m_cols_h) >= 1:
+            # 若少數公司當月尚未申報，自動往後抓最新一筆有效持股(%)
+            pivot_h['B7_董監最新持股(%)'] = pivot_h[m_cols_h].bfill(axis=1).iloc[:, 0]
+        else:
+            pivot_h['B7_董監最新持股(%)'] = np.nan
 
+        delta_cols = [
+            'B7_董監近月增減(%)',
+            'B7_前1月增減(%)',
+            'B7_前2月增減(%)',
+            'B7_前3月增減(%)',
+            'B7_前4月增減(%)',
+            'B7_前5月增減(%)'
+        ]
+        
+        # 依序計算每個月份與前一個月份的差值；若歷史檔案還不夠多則填 NaN
+        for i, col_name in enumerate(delta_cols):
+            if len(m_cols_h) >= i + 2:
+                pivot_h[col_name] = (pivot_h[m_cols_h[i]] - pivot_h[m_cols_h[i+1]]).round(2)
+            else:
+                pivot_h[col_name] = np.nan
+
+        def get_hold_trend(row):
+            val = row['B7_董監近月增減(%)']
+            if pd.isna(val): return "⚪ 無資料"
+            if val >= 1.0: base_trend = "🔥 大增"
+            elif val >= 0.1: base_trend = "📈 增"
+            elif val > 0: base_trend = "↗️ 微增"
+            elif val == 0: base_trend = "🔄 持平"
+            elif val > -0.1: base_trend = "↘️ 微減"
+            else: base_trend = "🚨 大減"
+            
+            # 💡 自動統計「董監連N月增」(如誠美材連3增)，方便在網頁與 NBLM 直接搜尋
+            consec_inc = 0
+            for c in delta_cols:
+                v = row.get(c, np.nan)
+                if pd.notna(v) and v > 0:
+                    consec_inc += 1
+                else:
+                    break
+            if consec_inc >= 2:
+                return f"{base_trend} (🔥連{consec_inc}月增)"
+            return base_trend
+
+        pivot_h['B7_董監持股動態'] = pivot_h.apply(get_hold_trend, axis=1)
+        
+        keep_cols = ['stock_code', 'B7_董監最新持股(%)', 'B7_董監持股動態'] + delta_cols
+        df_b7_features = pd.merge(df_b7_features, pivot_h[keep_cols], on='stock_code', how='left')
     # --- 2. 計算質押比趨勢 ---
     if c_pledge:
         pledge_df = master_df[['stock_code', c_month, c_pledge]].copy()
