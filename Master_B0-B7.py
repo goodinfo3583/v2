@@ -1003,7 +1003,6 @@ def process_major_shareholders_for_master(DATA_DIR, target_level):
                 new_col = f"B5_{target_level}_當週增減(%)" if i == 0 else f"B5_{target_level}_前{i}週增減(%)"
                 rename_dict[old_col] = new_col
 
-        # 原本的 6 週增減計算
         calc_cols_6 = [f"DELTA_{d}" for d in sorted_dates_4[:6] if f"DELTA_{d}" in master.columns]
         six_week_col = f'B5_{target_level}_6週增減(%)'
         if len(calc_cols_6) < 6: master[six_week_col] = np.nan
@@ -1036,12 +1035,11 @@ def process_major_shareholders_for_master(DATA_DIR, target_level):
         master[f'B5_{target_level}週動態'] = master[f"DELTA_{latest_date_4}"].apply(get_1w_trend)
         master[f'B5_{target_level}6週動態'] = master[six_week_col].apply(get_6w_trend)
 
-        # 👇👇👇 新增：針對「1千」張大戶進行 1/4/6/12 週多期程排名與 △排名運算 👇👇👇
-        extra_1k_cols = []
-        if target_level == '1千':
-            TOP_N_RANK = 200  # 設定前 200 名為上榜門檻 (對齊 B1)
+        # 👇👇👇 針對「1千」與「400」張大戶進行 1/4/6/12 週試算與排名 👇👇👇
+        if target_level in ['1千', '400']:
+            TOP_N_RANK = 200
             
-            # 1. 計算大戶連買/連賣週數動態
+            # 1. 連買動態
             all_delta_cols = [f"DELTA_{d}" for d in sorted_dates_4 if f"DELTA_{d}" in master.columns]
             delta_matrix = master[all_delta_cols].to_numpy()
             def calc_b5_streak(row_arr):
@@ -1057,40 +1055,27 @@ def process_major_shareholders_for_master(DATA_DIR, target_level):
                 elif streak == 1: return "↗️ 轉增 1 週"
                 elif streak == -1: return "↘️ 轉減 1 週"
                 return "🔄 持平"
-            
-            streak_col = f'B5_{target_level}_連買動態'
-            master[streak_col] = [calc_b5_streak(r) for r in delta_matrix]
-            extra_1k_cols.append(streak_col)
+            master[f'B5_{target_level}_連買動態'] = [calc_b5_streak(r) for r in delta_matrix]
 
-            # 2. 計算 1 / 4 / 6 / 12 週累積增減(%)、當週排名、上週排名、以及 △排名
+            # 2. 計算 1 / 4 / 6 / 12 週增減(%)、排名、△排名
             for w in [1, 4, 6, 12]:
                 curr_w_cols = [f"DELTA_{d}" for d in sorted_dates_4[:w] if f"DELTA_{d}" in master.columns]
                 prev_w_cols = [f"DELTA_{d}" for d in sorted_dates_4[1:w+1] if f"DELTA_{d}" in master.columns]
                 
-                # 定義各期程增減欄位名稱 (1週與6週直接沿用既有欄位，只新增 4週與 12週)
-                if w == 1:
-                    chg_col = f"DELTA_{latest_date_4}"
-                elif w == 6:
-                    chg_col = six_week_col
+                if w == 1: chg_col = f"DELTA_{latest_date_4}"
+                elif w == 6: chg_col = six_week_col
                 else:
                     chg_col = f'B5_{target_level}_{w}週增減(%)'
-                    if len(curr_w_cols) < w:
-                        master[chg_col] = np.nan
-                    else:
-                        master[chg_col] = master[curr_w_cols].sum(axis=1, min_count=1).astype('float32')
-                    extra_1k_cols.append(chg_col)
+                    master[chg_col] = np.nan if len(curr_w_cols) < w else master[curr_w_cols].sum(axis=1, min_count=1).astype('float32')
 
                 rank_col = f'B5_{target_level}_{w}週排名'
                 delta_rank_col = f'B5_{target_level}_{w}週△排名'
 
-                # 本週排名 (僅針對增減 > 0 的正向加碼股排名)
                 if chg_col in master.columns and master[chg_col].notna().any():
-                    pos_curr = master[chg_col] > 0
-                    master[rank_col] = master[chg_col].where(pos_curr).rank(ascending=False, method='min')
+                    master[rank_col] = master[chg_col].where(master[chg_col] > 0).rank(ascending=False, method='min')
                 else:
                     master[rank_col] = np.nan
 
-                # 上週同期的排名 (用滑動視窗 [1 : w+1] 計算，不受每日執行影響)
                 if len(prev_w_cols) == w:
                     prev_sum = master[prev_w_cols].sum(axis=1, min_count=1)
                     prev_rank = prev_sum.where(prev_sum > 0).rank(ascending=False, method='min')
@@ -1106,33 +1091,43 @@ def process_major_shareholders_for_master(DATA_DIR, target_level):
                     return "➖ 0"
 
                 master[delta_rank_col] = [calc_b5_rank_delta(c, p) for c, p in zip(master[rank_col], prev_rank)]
-                # 若超過 200 名想要保留全市場名次可不洗掉，若想比照 B1 只留前 200 名可加上下一行：
-                # master.loc[master[rank_col] > TOP_N_RANK, rank_col] = np.nan
-                extra_1k_cols.extend([rank_col, delta_rank_col])
 
-            # 3. 彙整「上榜區塊」標籤 (進入前 200 名即點亮該期程標籤)
+            # 3. 上榜區塊標籤
             def make_b5_section_tags(row):
                 tags = []
                 for w, label in [(1, '🔴1週'), (4, '🟡4週'), (6, '🟢6週'), (12, '🔵12週')]:
                     r = row.get(f'B5_{target_level}_{w}週排名', np.nan)
-                    if pd.notna(r) and 0 < r <= TOP_N_RANK:
-                        tags.append(label)
+                    if pd.notna(r) and 0 < r <= TOP_N_RANK: tags.append(label)
                 return " ".join(tags)
+            master[f'B5_{target_level}_上榜區塊'] = master.apply(make_b5_section_tags, axis=1)
 
-            sect_col = f'B5_{target_level}_上榜區塊'
-            master[sect_col] = master.apply(make_b5_section_tags, axis=1)
-            extra_1k_cols.insert(0, sect_col)
-        # 👆👆👆 新增到此為止 👆👆👆
-        
+        # 先將 DELTA_XXXX 轉為當週/前N週名稱
         master = master.rename(columns=rename_dict)
-        cols_order = ['stock_code', f'B5_{target_level}週動態', f'B5_{target_level}6週動態'] + extra_1k_cols + [six_week_col]
-        if f"B5_{target_level}_最新持有(%)" in master.columns: cols_order.append(f"B5_{target_level}_最新持有(%)")
-        for new_col in rename_dict.values():
-            if new_col not in cols_order: cols_order.append(new_col)
+        
+        # 🎯 嚴格定義欄位順序（1千 與 400 皆採用同質性聚落排序）
+        if target_level in ['1千', '400']:
+            cols_order = [
+                'stock_code',
+                # 1. 總覽與動態區
+                f'B5_{target_level}_上榜區塊', f'B5_{target_level}_連買動態', f'B5_{target_level}週動態', f'B5_{target_level}6週動態', f'B5_{target_level}_最新持有(%)',
+                # 2. 多期程增減(%)區 (1週 -> 4週 -> 6週 -> 12週)
+                f'B5_{target_level}_當週增減(%)', f'B5_{target_level}_4週增減(%)', f'B5_{target_level}_6週增減(%)', f'B5_{target_level}_12週增減(%)',
+                # 3. 多期程排名區
+                f'B5_{target_level}_1週排名', f'B5_{target_level}_4週排名', f'B5_{target_level}_6週排名', f'B5_{target_level}_12週排名',
+                # 4. 多期程 △排名區
+                f'B5_{target_level}_1週△排名', f'B5_{target_level}_4週△排名', f'B5_{target_level}_6週△排名', f'B5_{target_level}_12週△排名',
+                # 5. 歷週明細區 (前1週 ~ 前5週)
+                f'B5_{target_level}_前1週增減(%)', f'B5_{target_level}_前2週增減(%)', f'B5_{target_level}_前3週增減(%)', f'B5_{target_level}_前4週增減(%)', f'B5_{target_level}_前5週增減(%)'
+            ]
+        else:
+            cols_order = ['stock_code', f'B5_{target_level}週動態', f'B5_{target_level}6週動態', six_week_col]
+            if f"B5_{target_level}_最新持有(%)" in master.columns: cols_order.append(f"B5_{target_level}_最新持有(%)")
+            for new_col in rename_dict.values():
+                if new_col not in cols_order: cols_order.append(new_col)
             
         final_df = master[[c for c in cols_order if c in master.columns]].copy()
         for c in final_df.select_dtypes(include=['float32', 'float64']).columns:
-            if not any(k in c for k in ['週增減(%)', '排名']) or '當週' in c or '前' in c:
+            if not any(k in c for k in ['4週增減', '6週增減', '12週增減', '排名']):
                 final_df[c] = final_df[c].fillna(0.0)
         return final_df
     return pd.DataFrame()
@@ -1213,7 +1208,7 @@ def run_master_pipeline():
 
     df_master = df_master.copy()
 
-    # === 🚀 最精準的法人金額計算 ===
+    # === 🚀 最精準的法人與大戶金額計算 ===
     if 'B1_合計買賣超張數' in df_master.columns and '成交' in df_master.columns:
         df_master['B1_1日法人金額(萬)'] = (df_master['B1_合計買賣超張數'] * df_master['成交']) / 10
         
@@ -1222,32 +1217,81 @@ def run_master_pipeline():
             if f'B1_{d}日△Change' in df_master.columns and f'{d}日均價' in df_master.columns:
                 df_master[f'B1_{d}日法人金額(萬)'] = (df_master['估算總發行張數'] * (df_master[f'B1_{d}日△Change'] / 100) * df_master[f'{d}日均價']) / 10
 
-        # 👇👇👇 新增：B5 千張大戶多期程斥資金額(萬) 精算 (對齊 5/20/30/60 日均價) 👇👇👇
-        b5_price_map = {
-            1: ('B5_1千_當週增減(%)', '5日均價'),
-            4: ('B5_1千_4週增減(%)', '20日均價'),
-            6: ('B5_1千_6週增減(%)', '30日均價'),
-            12: ('B5_1千_12週增減(%)', '60日均價')
-        }
-        for w, (b5_chg_col, ma_price_col) in b5_price_map.items():
-            if b5_chg_col in df_master.columns and ma_price_col in df_master.columns:
-                df_master[f'B5_1千_{w}週金額(萬)'] = (
-                    df_master['估算總發行張數'] * (df_master[b5_chg_col] / 100.0) * df_master[ma_price_col]
-                ).div(10.0).round(1)
-        # 👆👆👆 新增到此為止 👆👆👆
-    
-    # 🧩 欄位智慧重排
+        # 👇👇👇 針對「1千」與「400」張大戶同步計算：1. 異動性質檢定  2. 多期程斥資金額(萬) 👇👇👇
+        for lvl in ['1千', '400']:
+            b5_weekly_cols = [c for c in [f'B5_{lvl}_當週增減(%)', f'B5_{lvl}_前1週增減(%)', f'B5_{lvl}_前2週增減(%)', 
+                                          f'B5_{lvl}_前3週增減(%)', f'B5_{lvl}_前4週增減(%)', f'B5_{lvl}_前5週增減(%)'] if c in df_master.columns]
+            if b5_weekly_cols and '20日均量(張)' in df_master.columns:
+                max_1w_jump = df_master[b5_weekly_cols].abs().max(axis=1)
+                implied_jump_lots = df_master['估算總發行張數'] * (max_1w_jump / 100.0)
+                weekly_mkt_vol = df_master['20日均量(張)'].fillna(df_master.get('5日均量(張)', 0)) * 5.0
+                
+                is_non_market = (max_1w_jump >= 3.0) & (weekly_mkt_vol > 0) & (implied_jump_lots > weekly_mkt_vol * 0.8)
+                df_master[f'B5_{lvl}_異動性質'] = np.where(
+                    is_non_market, 
+                    "⚠️ 非現貨異動(私募/除權/CB)", 
+                    np.where(df_master.get(f'B5_{lvl}_6週增減(%)', 0) > 0, "✅ 市場現貨吸籌", "-")
+                )
+
+            b5_price_map = {
+                1: (f'B5_{lvl}_當週增減(%)', '5日均價'),
+                4: (f'B5_{lvl}_4週增減(%)', '20日均價'),
+                6: (f'B5_{lvl}_6週增減(%)', '30日均價'),
+                12: (f'B5_{lvl}_12週增減(%)', '60日均價')
+            }
+            for w, (b5_chg_col, ma_price_col) in b5_price_map.items():
+                if b5_chg_col in df_master.columns and ma_price_col in df_master.columns:
+                    df_master[f'B5_{lvl}_{w}週金額(萬)'] = (
+                        df_master['估算總發行張數'] * (df_master[b5_chg_col] / 100.0) * df_master[ma_price_col]
+                    ).div(10.0).round(1)
+
+    # B6 防守價位狀態邏輯
+    if 'B6_鉅額成交價區間' in df_master.columns and '成交' in df_master.columns:
+        def check_block_trade_defense(row):
+            b_prices_str = str(row.get('B6_鉅額成交價區間', ''))
+            c_price = row.get('成交', np.nan)
+            if pd.isna(c_price) or b_prices_str in ['', 'nan', '-']:
+                return "⚪ 無鉅額交易"
+            try:
+                prices = [float(p.strip()) for p in b_prices_str.split('/') if p.strip()]
+                if not prices: return "⚪ 無法解析"
+                max_p, min_p = max(prices), min(prices)
+                if c_price > max_p: return "🟢 強勢站上"
+                elif c_price < min_p: return "🔴 跌破套牢"
+                else: return "🟡 區間防守"
+            except:
+                return "⚪ 資料異常"
+        df_master['B6_防守價位狀態'] = df_master.apply(check_block_trade_defense, axis=1)
+
+    # 🧩 欄位智慧重排 (將 B5_1千 與 B5_400 的 異動性質 與 金額(萬) 精準插回對應聚落中)
     base_and_b0 = [c for c in df_master.columns if not re.match(r'^B[1234567]_', c)] 
     b1_cols = [c for c in df_master.columns if c.startswith('B1_')]
     b2_cols = [c for c in df_master.columns if c.startswith('B2_')]
     b3_cols = [c for c in df_master.columns if c.startswith('B3_')]
     b4_cols = [c for c in df_master.columns if c.startswith('B4_')]
-    b5_cols = [c for c in df_master.columns if c.startswith('B5_')]
+
+    special_b5_tails, special_b5_amts, special_b5_flags, exclude_b5 = {}, {}, {}, []
+    for lvl in ['1千', '400']:
+        special_b5_tails[lvl] = [f'B5_{lvl}_前{i}週增減(%)' for i in range(1, 6) if f'B5_{lvl}_前{i}週增減(%)' in df_master.columns]
+        special_b5_amts[lvl] = [f'B5_{lvl}_{w}週金額(萬)' for w in [1, 4, 6, 12] if f'B5_{lvl}_{w}週金額(萬)' in df_master.columns]
+        special_b5_flags[lvl] = [f'B5_{lvl}_異動性質'] if f'B5_{lvl}_異動性質' in df_master.columns else []
+        exclude_b5.extend(special_b5_tails[lvl] + special_b5_amts[lvl] + special_b5_flags[lvl])
+
+    raw_b5_cols = [c for c in df_master.columns if c.startswith('B5_') and c not in exclude_b5]
+    b5_cols = []
+    for c in raw_b5_cols:
+        b5_cols.append(c)
+        for lvl in ['1千', '400']:
+            if c == f'B5_{lvl}_上榜區塊':
+                b5_cols.extend(special_b5_flags[lvl])
+            elif c == f'B5_{lvl}_12週△排名':
+                b5_cols.extend(special_b5_amts[lvl])
+                b5_cols.extend(special_b5_tails[lvl])
+            
     b6_cols = [c for c in df_master.columns if c.startswith('B6_')]
     b7_cols = [c for c in df_master.columns if c.startswith('B7_')] 
     
-    ordered_cols = base_and_b0 + b1_cols + b2_cols + b3_cols + b4_cols + b5_cols + b6_cols + b7_cols
-    
+    ordered_cols = base_and_b0 + b1_cols + b2_cols + b3_cols + b4_cols + b5_cols + b6_cols + b7_cols 
     # === 前方維持原本的欄位重排與合併 ===
     missing_cols = [c for c in df_master.columns if c not in ordered_cols]
     df_master = df_master[ordered_cols + missing_cols]
