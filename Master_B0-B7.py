@@ -31,7 +31,291 @@ def fetch_github_json_all():
                     json_dfs[d] = df[['stock_code', f'B1_{d}日△Change', f'B1_{d}日排名']]
         except Exception: pass
     return json_dfs
+# ==========================================
+# 模組零：B00 大盤指數、資券與期權宏觀趨勢 (每日往前累積時間序列版)
+# ==========================================
+def normalize_roc_or_west_date(d_str):
+    """將 115/11/16 或 2026/11/16 統一轉為 20261116 字串"""
+    s = str(d_str).strip()
+    if not s or s.lower() in ['nan', 'none', '']:
+        return None
+    m_roc = re.match(r'^(\d{2,3})[/\-](\d{1,2})[/\-](\d{1,2})$', s)
+    if m_roc:
+        return f"{int(m_roc.group(1)) + 1911:04d}{int(m_roc.group(2)):02d}{int(m_roc.group(3)):02d}"
+    m_west = re.match(r'^(20\d{2})[/\-](\d{1,2})[/\-](\d{1,2})$', s)
+    if m_west:
+        return f"{int(m_west.group(1)):04d}{int(m_west.group(2)):02d}{int(m_west.group(3)):02d}"
+    m_8 = re.match(r'^(20\d{6})$', s)
+    return m_8.group(1) if m_8 else None
 
+def process_b00_macro_features(DATA_DIR, OUTPUT_DIR, target_date):
+    print(f"▶️ [0/5] 開始處理 B00 大盤指數、資券與期權宏觀累積趨勢 (基準日: {target_date})...")
+    
+    def clean_num(s):
+        return pd.to_numeric(s.astype(str).str.replace(',', '', regex=False).str.replace('%', '', regex=False).str.strip(), errors='coerce')
+
+    # 讀取既有累積歷史表 (確保就算舊爬蟲原料檔被清理，歷史紀錄依然永久保留)
+    hist_csv_path = os.path.join(OUTPUT_DIR, "B00_macro_history.csv")
+    df_existing = pd.DataFrame()
+    if os.path.exists(hist_csv_path):
+        try:
+            df_existing = pd.read_csv(hist_csv_path, encoding='utf-8-sig', dtype={'日期': str})
+        except Exception:
+            pass
+
+    # ---------------------------------------------------------
+    # 1. 累積所有【上市加權指數】檔案並計算 5/10/20/60/120/240 MA
+    # ---------------------------------------------------------
+    twse_files = sorted(glob.glob(os.path.join(DATA_DIR, "*大盤上市成交量*.csv")))
+    twse_dfs = []
+    if not df_existing.empty and '上市加權指數' in df_existing.columns:
+        twse_dfs.append(df_existing[['日期', '上市加權指數', '上市漲跌幅(%)', '上市成交金額(億)']].dropna(subset=['日期', '上市加權指數']))
+    for f in twse_files:
+        if extract_date_from_name(os.path.basename(f)) > target_date: continue
+        try:
+            df = pd.read_csv(f, encoding='utf-8-sig')
+            df['日期'] = df['日期'].apply(normalize_roc_or_west_date)
+            df['上市加權指數'] = clean_num(df['發行量加權股價指數'])
+            df['上市漲跌點數'] = clean_num(df['漲跌點數'])
+            df['上市漲跌幅(%)'] = (df['上市漲跌點數'] / (df['上市加權指數'] - df['上市漲跌點數']) * 100).round(2)
+            df['上市成交金額(億)'] = (clean_num(df['成交金額']) / 1e8).round(2)
+            twse_dfs.append(df[['日期', '上市加權指數', '上市漲跌幅(%)', '上市成交金額(億)']].dropna(subset=['日期']))
+        except Exception: continue
+
+    if twse_dfs:
+        df_twse_all = pd.concat(twse_dfs, ignore_index=True).drop_duplicates(subset=['日期'], keep='last')
+        df_twse_all = df_twse_all[df_twse_all['日期'] <= target_date].sort_values('日期', ascending=True).reset_index(drop=True)
+        for ma in [5, 10, 20, 60, 120, 240]:
+            df_twse_all[f'上市{ma}MA'] = df_twse_all['上市加權指數'].rolling(ma, min_periods=ma).mean().round(2)
+    else:
+        df_twse_all = pd.DataFrame(columns=['日期'])
+
+    # ---------------------------------------------------------
+    # 2. 累積所有【上櫃櫃買指數】檔案並計算 5/10/20/60/120/240 MA
+    # ---------------------------------------------------------
+    tpex_files = sorted(glob.glob(os.path.join(DATA_DIR, "*大盤上櫃成交量*.csv")))
+    tpex_dfs = []
+    if not df_existing.empty and '上櫃櫃買指數' in df_existing.columns:
+        tpex_dfs.append(df_existing[['日期', '上櫃櫃買指數', '上櫃漲跌幅(%)', '上櫃成交金額(億)']].dropna(subset=['日期', '上櫃櫃買指數']))
+    for f in tpex_files:
+        if extract_date_from_name(os.path.basename(f)) > target_date: continue
+        try:
+            df = pd.read_csv(f, encoding='utf-8-sig')
+            df['日期'] = df['日期'].apply(normalize_roc_or_west_date)
+            df['上櫃櫃買指數'] = clean_num(df['櫃買指數'])
+            df['上櫃漲跌點數'] = clean_num(df['漲跌點數'])
+            df['上櫃漲跌幅(%)'] = (df['上櫃漲跌點數'] / (df['上櫃櫃買指數'] - df['上櫃漲跌點數']) * 100).round(2)
+            df['上櫃成交金額(億)'] = (clean_num(df['成交金額(千元)']) / 1e5).round(2)
+            tpex_dfs.append(df[['日期', '上櫃櫃買指數', '上櫃漲跌幅(%)', '上櫃成交金額(億)']].dropna(subset=['日期']))
+        except Exception: continue
+
+    if tpex_dfs:
+        df_tpex_all = pd.concat(tpex_dfs, ignore_index=True).drop_duplicates(subset=['日期'], keep='last')
+        df_tpex_all = df_tpex_all[df_tpex_all['日期'] <= target_date].sort_values('日期', ascending=True).reset_index(drop=True)
+        for ma in [5, 10, 20, 60, 120, 240]:
+            df_tpex_all[f'上櫃{ma}MA'] = df_tpex_all['上櫃櫃買指數'].rolling(ma, min_periods=ma).mean().round(2)
+    else:
+        df_tpex_all = pd.DataFrame(columns=['日期'])
+
+    idx_map = dict(zip(df_twse_all['日期'], df_twse_all['上市加權指數'])) if not df_twse_all.empty else {}
+
+    # ---------------------------------------------------------
+    # 3. 累積所有【大盤融資融券餘額】檔案
+    # ---------------------------------------------------------
+    margin_files = sorted(glob.glob(os.path.join(DATA_DIR, "*融資融券餘額*.csv")))
+    margin_rows = []
+    for f in margin_files:
+        f_date = extract_date_from_name(os.path.basename(f))
+        if f_date == "00000000" or f_date > target_date: continue
+        try:
+            df_m = pd.read_csv(f, encoding='utf-8-sig')
+            df_m['前日餘額_num'] = clean_num(df_m['前日餘額'])
+            df_m['今日餘額_num'] = clean_num(df_m['今日餘額'])
+            df_m['單日增減'] = df_m['今日餘額_num'] - df_m['前日餘額_num']
+            amt_row = df_m[df_m['項目'].astype(str).str.contains('金額')].iloc[0]
+            sh_row = df_m[df_m['項目'].astype(str).str.contains('融券')].iloc[0]
+            margin_rows.append({
+                '日期': f_date,
+                '融資金額增減(億)': round(amt_row['單日增減'] / 1e5, 2),
+                '融資餘額(億)': round(amt_row['今日餘額_num'] / 1e5, 2),
+                '融券增減(張)': int(sh_row['單日增減']),
+                '融券餘額(張)': int(sh_row['今日餘額_num'])
+            })
+        except Exception: continue
+    df_margin_all = pd.DataFrame(margin_rows)
+    if not df_existing.empty and '融資餘額(億)' in df_existing.columns:
+        old_m = df_existing[['日期', '融資金額增減(億)', '融資餘額(億)', '融券增減(張)', '融券餘額(張)']].dropna(subset=['融資餘額(億)'])
+        df_margin_all = pd.concat([old_m, df_margin_all], ignore_index=True).drop_duplicates(subset=['日期'], keep='last')
+
+    # ---------------------------------------------------------
+    # 4. 累積所有【三大法人期貨多空】檔案 (大台/小台/微台)
+    # ---------------------------------------------------------
+    fut_files = sorted(glob.glob(os.path.join(DATA_DIR, "*三大法人期貨多空*.csv")))
+    fut_rows = []
+    latest_fut_detail_df = pd.DataFrame()
+    for f in fut_files:
+        f_date = extract_date_from_name(os.path.basename(f))
+        if f_date == "00000000" or f_date > target_date: continue
+        try:
+            df_f = pd.read_csv(f, encoding='utf-8-sig')
+            c_prod, c_inst = df_f.columns[1], df_f.columns[2]
+            df_f['net_tdy'] = clean_num(df_f['交易口數與契約金額_多空淨額']).fillna(0).astype(int)
+            df_f['net_oi'] = clean_num(df_f['未平倉餘額_多空淨額']).fillna(0).astype(int)
+            
+            def get_val(prod, inst, col):
+                m = df_f[(df_f[c_prod] == prod) & (df_f[c_inst] == inst)]
+                return int(m[col].iloc[0]) if not m.empty else 0
+
+            fut_rows.append({
+                '日期': f_date,
+                '外資大台當日淨口數': get_val('臺股期貨', '外資', 'net_tdy'),
+                '外資大台未平倉(口)': get_val('臺股期貨', '外資', 'net_oi'),
+                '投信大台未平倉(口)': get_val('臺股期貨', '投信', 'net_oi'),
+                '自營大台未平倉(口)': get_val('臺股期貨', '自營商', 'net_oi'),
+                '外資小台未平倉(口)': get_val('小型臺指期貨', '外資', 'net_oi'),
+                '外資微台未平倉(口)': get_val('微型臺指期貨', '外資', 'net_oi'),
+                '外資小微台當日淨口數': get_val('小型臺指期貨', '外資', 'net_tdy') + get_val('微型臺指期貨', '外資', 'net_tdy')
+            })
+            if f_date == target_date or latest_fut_detail_df.empty:
+                target_prods = ['臺股期貨', '電子期貨', '金融期貨', '小型臺指期貨', '微型臺指期貨', '櫃買指數期貨', '半導體30期貨']
+                df_f_sub = df_f[df_f[c_prod].isin(target_prods)].copy()
+                latest_fut_detail_df = pd.DataFrame({
+                    '商品名稱': df_f_sub[c_prod],
+                    '身份別': df_f_sub[c_inst],
+                    '當日多空淨口數': df_f_sub['net_tdy'],
+                    '未平倉多方口數': clean_num(df_f_sub['未平倉餘額_多方']).fillna(0).astype(int),
+                    '未平倉空方口數': clean_num(df_f_sub['未平倉餘額_空方']).fillna(0).astype(int),
+                    '未平倉淨口數': df_f_sub['net_oi'],
+                    '未平倉淨額(億)': (clean_num(df_f_sub['未平倉餘額_多空淨額.1']).fillna(0) / 1e5).round(2)
+                })
+        except Exception: continue
+    df_fut_all = pd.DataFrame(fut_rows)
+    if not df_existing.empty and '外資大台未平倉(口)' in df_existing.columns:
+        old_f = df_existing[['日期', '外資大台當日淨口數', '外資大台未平倉(口)', '投信大台未平倉(口)', '自營大台未平倉(口)', '外資小台未平倉(口)', '外資微台未平倉(口)', '外資小微台當日淨口數']].dropna(subset=['外資大台未平倉(口)'])
+        df_fut_all = pd.concat([old_f, df_fut_all], ignore_index=True).drop_duplicates(subset=['日期'], keep='last')
+
+    # ---------------------------------------------------------
+    # 5. 累積所有【選擇權 PC 比】與【選擇權最大支撐壓力區】檔案
+    # ---------------------------------------------------------
+    pc_files = sorted(glob.glob(os.path.join(DATA_DIR, "*選擇權PC比*.csv")))
+    pc_rows = []
+    for f in pc_files:
+        f_date = extract_date_from_name(os.path.basename(f))
+        if f_date > target_date: continue
+        try:
+            df_pcr = pd.read_csv(f, encoding='utf-8-sig')
+            for _, r in df_pcr.iterrows():
+                r_date = normalize_roc_or_west_date(r['日期']) or f_date
+                if r_date <= target_date:
+                    pc_rows.append({
+                        '日期': r_date,
+                        'PC_Ratio未平倉(%)': round(float(clean_num(pd.Series([r['買賣權未平倉量比率%']])).iloc[0]), 2),
+                        'PC_Ratio成交量(%)': round(float(clean_num(pd.Series([r['買賣權成交量比率%']])).iloc[0]), 2)
+                    })
+        except Exception: continue
+    df_pc_all = pd.DataFrame(pc_rows)
+    if not df_existing.empty and 'PC_Ratio未平倉(%)' in df_existing.columns:
+        old_pc = df_existing[['日期', 'PC_Ratio未平倉(%)', 'PC_Ratio成交量(%)']].dropna(subset=['PC_Ratio未平倉(%)'])
+        df_pc_all = pd.concat([old_pc, df_pc_all], ignore_index=True).drop_duplicates(subset=['日期'], keep='last')
+
+    opt_files = sorted(glob.glob(os.path.join(DATA_DIR, "*選擇權行情簡表*.csv")))
+    opt_rows, latest_opt_detail_df = [], pd.DataFrame()
+    for f in opt_files:
+        f_date = extract_date_from_name(os.path.basename(f))
+        if f_date == "00000000" or f_date > target_date: continue
+        try:
+            df_o = pd.read_csv(f, encoding='utf-8-sig')
+            df_o.columns = [c.strip() for c in df_o.columns]
+            df_o['到期月份 (週別)'] = df_o['到期月份 (週別)'].astype(str).str.strip()
+            df_o['買賣權'] = df_o['買賣權'].astype(str).str.strip()
+            df_o['履約價'] = pd.to_numeric(df_o['履約價'], errors='coerce')
+            df_o['合計成交量'] = pd.to_numeric(df_o['*合計成交量'], errors='coerce').fillna(0).astype(int)
+            df_o['未沖銷契約量'] = pd.to_numeric(df_o['*未沖銷 契約量'], errors='coerce').fillna(0).astype(int)
+            df_o['最後成交價'] = df_o['最後 成交價'].astype(str).str.strip()
+            df_o['漲跌%'] = df_o['漲跌%'].astype(str).str.strip()
+            
+            c_idx = idx_map.get(f_date, 40000.0)
+            top_exps = df_o.groupby('到期月份 (週別)')['未沖銷契約量'].sum().sort_values(ascending=False).head(3).index.tolist()
+            if top_exps:
+                main_exp = top_exps[0]
+                sub = df_o[df_o['到期月份 (週別)'] == main_exp]
+                c_oi = sub[(sub['買賣權'] == 'Call') & (sub['履約價'] >= c_idx * 0.98) & (sub['履約價'] <= c_idx * 1.18)].sort_values('未沖銷契約量', ascending=False)
+                p_oi = sub[(sub['買賣權'] == 'Put') & (sub['履約價'] >= c_idx * 0.88) & (sub['履約價'] <= c_idx * 1.03)].sort_values('未沖銷契約量', ascending=False)
+                opt_rows.append({
+                    '日期': f_date,
+                    '選擇權主力合約': main_exp,
+                    '選擇權最大Call壓力': f"{int(c_oi.iloc[0]['履約價'])}({c_oi.iloc[0]['未沖銷契約量']}口)" if not c_oi.empty else "-",
+                    '選擇權最大Put支撐': f"{int(p_oi.iloc[0]['履約價'])}({p_oi.iloc[0]['未沖銷契約量']}口)" if not p_oi.empty else "-"
+                })
+                if f_date == target_date or latest_opt_detail_df.empty:
+                    detail_list = []
+                    for exp in top_exps:
+                        s_exp = df_o[df_o['到期月份 (週別)'] == exp]
+                        calls_top = s_exp[(s_exp['買賣權'] == 'Call') & (s_exp['履約價'] >= c_idx * 0.98) & (s_exp['履約價'] <= c_idx * 1.18)].sort_values('未沖銷契約量', ascending=False).head(5)
+                        puts_top = s_exp[(s_exp['買賣權'] == 'Put') & (s_exp['履約價'] >= c_idx * 0.88) & (s_exp['履約價'] <= c_idx * 1.03)].sort_values('未沖銷契約量', ascending=False).head(5)
+                        for rk, (_, r) in enumerate(calls_top.iterrows(), 1):
+                            detail_list.append({'合約期別': exp, '類型': f'Call壓力Top{rk}', '履約價': int(r['履約價']), '未沖銷契約量(口)': r['未沖銷契約量'], '合計成交量(口)': r['合計成交量'], '最後成交價': r['最後成交價'], '漲跌%': r['漲跌%']})
+                        for rk, (_, r) in enumerate(puts_top.iterrows(), 1):
+                            detail_list.append({'合約期別': exp, '類型': f'Put支撐Top{rk}', '履約價': int(r['履約價']), '未沖銷契約量(口)': r['未沖銷契約量'], '合計成交量(口)': r['合計成交量'], '最後成交價': r['最後成交價'], '漲跌%': r['漲跌%']})
+                    latest_opt_detail_df = pd.DataFrame(detail_list)
+        except Exception: continue
+    df_opt_all = pd.DataFrame(opt_rows)
+    if not df_existing.empty and '選擇權最大Call壓力' in df_existing.columns:
+        old_opt = df_existing[['日期', '選擇權主力合約', '選擇權最大Call壓力', '選擇權最大Put支撐']].dropna(subset=['選擇權最大Call壓力'])
+        df_opt_all = pd.concat([old_opt, df_opt_all], ignore_index=True).drop_duplicates(subset=['日期'], keep='last')
+
+    # ---------------------------------------------------------
+    # 💾 6. 合併為「每日往前累積歷史總表」(由近到遠排序: 20261117, 20261116...)
+    # ---------------------------------------------------------
+    df_macro_hist = pd.merge(df_twse_all, df_tpex_all, on='日期', how='outer')
+    for sub_df in [df_margin_all, df_fut_all, df_pc_all, df_opt_all]:
+        if not sub_df.empty:
+            df_macro_hist = pd.merge(df_macro_hist, sub_df, on='日期', how='left')
+
+    df_macro_hist = df_macro_hist.sort_values('日期', ascending=False).reset_index(drop=True)
+    
+    # 儲存累積 CSV 與 Parquet (下次執行時會自動讀取並繼續往上疊加新日期)
+    df_macro_hist.to_csv(hist_csv_path, index=False, encoding='utf-8-sig')
+    df_macro_hist.to_parquet(os.path.join(OUTPUT_DIR, "B00_macro_history.parquet"), index=False)
+
+    # 提取最新一日漲跌幅回傳給 B0 個股計算「強於大盤(%)」
+    macro_info = {'twse_pct': np.nan, 'tpex_pct': np.nan, 'twse_idx': 40000.0}
+    if not df_macro_hist.empty:
+        latest_row = df_macro_hist.iloc[0]
+        macro_info['twse_pct'] = latest_row.get('上市漲跌幅(%)', np.nan)
+        macro_info['tpex_pct'] = latest_row.get('上櫃漲跌幅(%)', np.nan)
+        macro_info['twse_idx'] = latest_row.get('上市加權指數', 40000.0)
+
+    # 產出 NBLM 專用 TXT (結合【每日累積歷史寬表】+【當日期權支撐壓力明細】)
+    df_macro_txt = df_macro_hist.copy()
+    for col in df_macro_txt.select_dtypes(include=['float32', 'float64']).columns:
+        df_macro_txt[col] = df_macro_txt[col].map(lambda x: "" if pd.isna(x) else ("0" if x == 0 else f"{x:.2f}".rstrip('0').rstrip('.')))
+
+    report_lines = [
+        f"# 📊 台股大盤、資券與期權宏觀趨勢累積總表 (最新基準日: {target_date})",
+        "本檔案採「每日往前累積（由近到遠排序）」設計，第一部分為跨日連續累積的【大盤、資券、期貨、PC比與最大支撐壓力歷史總表】，第二、三部分為最新交易日的【三大法人期貨明細】與【選擇權各履約價莊家防線明細】。",
+        "",
+        "## 一、 大盤指數、均線、資券與期權每日累積歷史總表 (由最新日期往下排列)",
+        df_macro_txt.to_csv(index=False, sep='\t').strip(),
+        ""
+    ]
+    if not latest_fut_detail_df.empty:
+        report_lines.append(f"## 二、 最新交易日 ({target_date}) 三大法人期貨各商品部位明細")
+        report_lines.append(latest_fut_detail_df.to_csv(index=False, sep='\t').strip())
+        report_lines.append("")
+    if not latest_opt_detail_df.empty:
+        report_lines.append(f"## 三、 最新交易日 ({target_date}) 臺指選擇權近端莊家支撐與壓力 Top 5 明細")
+        report_lines.append(latest_opt_detail_df.to_csv(index=False, sep='\t').strip())
+
+    # 同時存一份固定檔名與一份帶日期檔名的 NBLM 宏觀檔
+    out_macro_fixed = os.path.join(OUTPUT_DIR, "B00_大盤與期權宏觀趨勢_NBLM.txt")
+    out_macro_dated = os.path.join(OUTPUT_DIR, f"{target_date}_B00_大盤與期權宏觀趨勢_NBLM.txt")
+    report_str = "\n".join(report_lines)
+    with open(out_macro_fixed, "w", encoding="utf-8") as f: f.write(report_str)
+    with open(out_macro_dated, "w", encoding="utf-8") as f: f.write(report_str)
+    
+    print(f" └─ 🏆 已更新累積宏觀歷史表 ({len(df_macro_hist)} 日): {hist_csv_path} 與 {out_macro_dated}")
+    return macro_info
 # ==========================================
 # 模組一：B0 價格與量能運算 (負責定錨日期)
 # ==========================================
@@ -1165,6 +1449,33 @@ def run_master_pipeline():
         
     print(f"\n🎯 系統鎖定基準日期: {target_date} (以 B0 最新日期為發動機)")
     
+    # 👇👇👇 新增：執行 B00 大盤與期權宏觀模組，並將「相對大盤強弱」插入 df_b0 前段 👇👇👇
+    macro_info = process_b00_macro_features(DATA_DIR, OUTPUT_DIR, target_date)
+    if pd.notna(macro_info.get('twse_pct')):
+        bench_pct = macro_info['twse_pct']
+        alpha_series = (df_b0['漲跌幅'] - bench_pct).round(2)
+        alpha_tag = np.select(
+            [
+                (bench_pct <= -1.5) & (df_b0['漲跌幅'] > 0),
+                alpha_series >= 3.0,
+                alpha_series >= 1.0,
+                alpha_series <= -3.0,
+                alpha_series <= -1.0
+            ],
+            [
+                "👑 逆勢收紅 (極強抗跌)",
+                "🚀 遠強於大盤 (領漲/抗跌)",
+                "🛡️ 強於大盤 (相對抗跌)",
+                "🩸 遠弱於大盤 (重災領跌)",
+                "🥀 弱於大盤"
+            ],
+            default="⚖️ 隨盤震盪"
+        )
+        insert_pos = df_b0.columns.get_loc('資金延續趨勢') + 1 if '資金延續趨勢' in df_b0.columns else 5
+        df_b0.insert(insert_pos, 'B0_強於大盤(%)', alpha_series)
+        df_b0.insert(insert_pos + 1, 'B0_相對大盤強弱', alpha_tag)
+    # 👆👆👆 ==================================================================== 👆👆👆
+    
     # 2. 將基準日期傳入所有子模組
     df_b1 = process_b1_features(DATA_DIR, target_date)
     df_b23 = process_b2_b3_features(DATA_DIR, target_date)
@@ -1298,19 +1609,21 @@ def run_master_pipeline():
     
     out_parquet = f"{OUTPUT_DIR}/{target_date}_master_features.parquet"
     out_csv = f"{OUTPUT_DIR}/{target_date}_master_features.csv"
+    out_ai_txt = f"{OUTPUT_DIR}/{target_date}_master_features_AI_Analysis.txt"
     
-    # 1. 輸出給 Streamlit / Excel 看的標準版 (帶 BOM)
+    # 🌟 1. 統一將 df_master 所有浮點數四捨五入至小數點後第 2 位 (消除 .6666666667 無限小數)
+    float_cols = df_master.select_dtypes(include=['float32', 'float64']).columns
+    df_master[float_cols] = df_master[float_cols].round(2)
+
+    # 💾 2. 輸出給 Streamlit / Excel 看的標準版 (帶 BOM)
     df_master.to_parquet(out_parquet, index=False)
     df_master.to_csv(out_csv, index=False, encoding='utf-8-sig')
     
-    # 👇👇👇 AI (NotebookLM) 專用大表 (替換原本的降維版) 👇👇👇
-    out_ai_txt = f"{OUTPUT_DIR}/{target_date}_master_features_AI_Analysis.txt"
-    # 關鍵修改：
-    # 1. 直接餵入 df_master (完整 337 欄，保留所有均線、爆發倍數與法人張數)
-    # 2. 嚴格使用 encoding='utf-8' (去除 BOM)
-    # 3. 檔名改為 .txt 格式
-    df_master.to_csv(out_ai_txt, index=False, encoding='utf-8')
-    # 👆👆👆 ========================================================================= 👆👆👆
+    # 🤖 3. 輸出給 AI (NotebookLM) 專用大表 (自動剔除 100% 全空欄位如 180/240日 + 去除尾數 .0 省字元)
+    df_ai = df_master.dropna(axis=1, how='all').copy()
+    for col in df_ai.select_dtypes(include=['float32', 'float64']).columns:
+        df_ai[col] = df_ai[col].map(lambda x: "" if pd.isna(x) else ("0" if x == 0 else f"{x:.2f}".rstrip('0').rstrip('.')))
+    df_ai.to_csv(out_ai_txt, index=False, encoding='utf-8')
 
     print(f"\n🎉 完美大一統 B0~B7 ETL 執行完畢！")
     print(f"📁 檔案已直接存至前台會讀取的：\n  - {out_parquet}\n  - {out_csv}\n  - {out_ai_txt} (🤖 AI NBLM 專用檔)")
